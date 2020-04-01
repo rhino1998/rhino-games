@@ -12,4 +12,5 @@ require (
 	github.com/vektah/gqlparser/v2 v2.0.1
 	gopkg.in/mcuadros/go-defaults.v1 v1.1.0
 	gopkg.in/yaml.v2 v2.2.8
+	launchpad.net/gocheck v0.0.0-20140225173054-000000000087 // indirect
 )

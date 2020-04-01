@@ -1,37 +1,29 @@
-enum TileType {
-  UNKNOWN
-  NEUTRAL
-  DEATH
-  RED
-  BLUE
+enum PlayingCardSuit {
+  CLUBS
+  DIAMONDS
+  HEARTS
+  SPADES
 }
 
-type Board {
-  tiles: [[Tile!]!]!
+enum PlayingCardValue {
+  ACE
+  TWO
+  THREE
+  FOUR
+  FIVE
+  SIX
+  SEVEN
+  EIGHT
+  NINE
+  TEN
+  JACK
+  QUEEN
+  KING
 }
 
-type Tile {
-  kind: TileType!
+type PlayingCard {
   revealed: Boolean!
-  word: String!
+  value: PlayingCardValue!
+  suit: PlayingCardSuit!
 }
 
-type Mutation {
-  codenames: CodeNames!
-}
-
-type Query {
-  codenames: CodeNames!
-}
-
-type CodeNames {
-  board(category: String!, code: String!): Board
-  categories: [String!]!
-  newGame(category: String!, code: String!, x: Int!, y: Int!): Boolean!
-  hitTile(category: String!, code: String!, x: Int!, y: Int!): TileType!
-}
-
-schema {
-  query: Query
-  mutation: Mutation
-}
