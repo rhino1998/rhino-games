@@ -6,7 +6,7 @@ const ClosureCompilerPlugin = require("webpack-closure-compiler");
 
 module.exports = {
   // Entry file can be a Reason or OCaml file
-  entry: "./src/Index.re",
+    entry: "./frontend/src/Index.re",
   mode: "production",
   plugins: [
     // new ClosureCompilerPlugin({

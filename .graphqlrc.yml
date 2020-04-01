@@ -1,0 +1,9 @@
+schema:
+    - games/schema.graphql
+    - games/*/schema.graphql
+documents: ''
+extensions:
+  codegen:
+    generates:
+      frontend/graphql_schema.json:
+        - introspection

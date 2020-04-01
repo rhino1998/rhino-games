@@ -6,7 +6,7 @@ const convert = require("koa-connect");
 
 module.exports = {
   // Entry file can be a Reason or OCaml file
-  entry: "./src/Index.re",
+  entry: "./frontend/src/Index.re",
   mode: "development",
   plugins: [
     new HtmlWebpackPlugin({

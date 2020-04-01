@@ -1,0 +1,24 @@
+####{BSB GENERATED: NO EDIT
+FLG -ppx '/home/rhino/classes/codenames/node_modules/@baransu/graphql_ppx_re/ppx -schema frontend/graphql_schema.json'
+FLG -ppx '/home/rhino/classes/codenames/node_modules/bs-platform/lib/bsppx.exe -bs-jsx 3'
+S /home/rhino/classes/codenames/node_modules/bs-platform/lib/ocaml
+B /home/rhino/classes/codenames/node_modules/bs-platform/lib/ocaml
+FLG -nostdlib
+FLG -w -30-40+6+7+27+32..39+44+45+101
+S /home/rhino/classes/codenames/node_modules/reason-react/lib/ocaml
+B /home/rhino/classes/codenames/node_modules/reason-react/lib/ocaml
+S /home/rhino/classes/codenames/node_modules/reason-apollo/lib/ocaml
+B /home/rhino/classes/codenames/node_modules/reason-apollo/lib/ocaml
+S /home/rhino/classes/codenames/node_modules/reason-apollo-hooks/lib/ocaml
+B /home/rhino/classes/codenames/node_modules/reason-apollo-hooks/lib/ocaml
+S /home/rhino/classes/codenames/node_modules/bs-css/lib/ocaml
+B /home/rhino/classes/codenames/node_modules/bs-css/lib/ocaml
+S /home/rhino/classes/codenames/node_modules/bs-css-emotion/lib/ocaml
+B /home/rhino/classes/codenames/node_modules/bs-css-emotion/lib/ocaml
+S /home/rhino/classes/codenames/node_modules/bs-webapi/lib/ocaml
+B /home/rhino/classes/codenames/node_modules/bs-webapi/lib/ocaml
+S games/codenames
+B lib/bs/games/codenames
+S frontend/src
+B lib/bs/frontend/src
+####BSB GENERATED: NO EDIT}

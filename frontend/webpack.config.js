@@ -3,7 +3,7 @@ const path = require("path");
 
 module.exports = {
   // Entry file can be a Reason or OCaml file
-  entry: "./src/Index.re",
+  entry: "./frontend/src/Index.re",
   mode: "development",
   output: {
     filename: "out.js",

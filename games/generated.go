@@ -240,7 +240,7 @@ func (ec *executionContext) introspectType(name string) (*introspection.Type, er
 }
 
 var sources = []*ast.Source{
-	&ast.Source{Name: "schema.graphql", Input: `schema {
+	&ast.Source{Name: "games/schema.graphql", Input: `schema {
   query: Query
   mutation: Mutation
 }
@@ -254,7 +254,7 @@ type Query {
 }
 
 `, BuiltIn: false},
-	&ast.Source{Name: "codenames/schema.graphql", Input: `type CodeNames {
+	&ast.Source{Name: "games/codenames/schema.graphql", Input: `type CodeNames {
   board(category: String!, code: String!): Board
   categories: [String!]!
   newGame(category: String!, code: String!, x: Int!, y: Int!): Boolean!
