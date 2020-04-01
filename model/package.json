@@ -1,0 +1,14 @@
+{
+  "name": "model",
+  "version": "1.0.0",
+  "description": "type definitions for network scanner",
+  "main": "index.js",
+  "license": "MIT",
+  "devDependencies": {
+    "apollo": "^2.1.3",
+    "apollo-cli": "^0.4.0"
+  },
+  "dependencies": {
+    "bsc": "^0.1.0"
+  }
+}

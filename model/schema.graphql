@@ -1,0 +1,37 @@
+enum TileType {
+  UNKNOWN
+  NEUTRAL
+  DEATH
+  RED
+  BLUE
+}
+
+type Board {
+  tiles: [[Tile!]!]!
+}
+
+type Tile {
+  kind: TileType!
+  revealed: Boolean!
+  word: String!
+}
+
+type Mutation {
+  codenames: CodeNames!
+}
+
+type Query {
+  codenames: CodeNames!
+}
+
+type CodeNames {
+  board(category: String!, code: String!): Board
+  categories: [String!]!
+  newGame(category: String!, code: String!, x: Int!, y: Int!): Boolean!
+  hitTile(category: String!, code: String!, x: Int!, y: Int!): TileType!
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+}

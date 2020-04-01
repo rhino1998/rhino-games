@@ -1,0 +1,22 @@
+
+schema: ../../model/schema.graphql
+struct_tag: gqlgen
+exec:
+  filename: resolver/generated.go
+  package: resolver
+model:
+  filename: ../../model/models_gen.go
+  package: model
+resolver:
+  filename: resolver/resolver.go
+  type: Resolver
+
+models:
+  Board:
+    model: github.com/rhino1998/codenames/model/codenames.Board
+  Tile:
+    model: github.com/rhino1998/codenames/model/codenames.Tile
+  TileType:
+    model: github.com/rhino1998/codenames/model/codenames.TileType
+  CodeNames:
+    model: github.com/rhino1998/codenames/model/codenames.Game

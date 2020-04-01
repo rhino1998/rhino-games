@@ -1,0 +1,41 @@
+version: '3'
+services:
+  graphql:
+    build:
+      context: .
+      dockerfile: webapp/graphql/Dockerfile
+    environment:
+      "PORT": 3000
+    ports:
+      - "3000:3000"
+  frontend:
+    build:
+      context: .
+      dockerfile: webapp/frontend/Dockerfile
+    ports:
+      - "8080:80"
+    links:
+      - graphql
+  # gateway:
+  #   build:
+  #     context: .
+  #     dockerfile: webapp/gateway/Dockerfile
+  # postgres:
+  #   build: ./postgres
+  # redis:
+  #   build:
+  #     context: webapp/redis
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "6379:6379"
+  # nginx:
+  #   build: ./nginx
+  # worker:
+  #   build:
+  #     context: .
+  #     dockerfile: webapp/worker/Dockerfile
+  #   environment:
+  #     "WORKER_ID": "WORKER"
+  #   links:
+  #     - redis
+
