@@ -3,21 +3,14 @@ module Menu = {
   let make = (~items) =>
     items
     ->Belt.Array.mapWithIndex((index, item) =>
-        <button
+        <RsuiteUi.Button
           onClick={_ => ReasonReactRouter.push("/" ++ item ++ "/")}
           key=index->string_of_int>
           {ReasonReact.string(item)}
-        </button>
+        </RsuiteUi.Button>
       )
     |> ReasonReact.array;
 };
 
 [@react.component]
-let make = () =>
-  <div
-    className=Css.(
-      style([padding2(~h=pct(10.0), ~v=pct(0.0)), marginTop(pct(5.0))])
-    )>
-    <h1> {React.string("Rhino Games")} </h1>
-    <Columns> <Menu items=[|"codenames"|] /> </Columns>
-  </div>;
+let make = () => <Page> <Menu items=[|"codenames", "liarspoker"|] /> </Page>;

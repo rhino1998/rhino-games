@@ -6,37 +6,42 @@ import (
 	"context"
 
 	"github.com/rhino1998/codenames/games/codenames"
+	"github.com/rhino1998/codenames/games/liarspoker"
 )
+
+type CodeNames = codenames.Game
+type LiarsPoker = liarspoker.Game
 
 //Resolver implements the interface defined by the associated GraphQL schema
 type Resolver struct {
-	codenames *codenames.Game
+	*CodeNames
+	*LiarsPoker
 }
 
-func New(codenames *codenames.Game) *Resolver {
-	return &Resolver{codenames: codenames}
+func New(codenames *codenames.Game, liarspoker *LiarsPoker) *Resolver {
+	return &Resolver{CodeNames: codenames, LiarsPoker: liarspoker}
 }
 
 func (r *Resolver) Query() QueryResolver {
-	return &queryResolver{r: r}
+	return r
 }
 
 func (r *Resolver) Mutation() MutationResolver {
-	return &mutationResolver{r: r}
+	return r
 }
 
-type queryResolver struct {
-	r *Resolver
+func (r *Resolver) Subscription() SubscriptionResolver {
+	return r
 }
 
-func (q *queryResolver) Codenames(ctx context.Context) (*codenames.Game, error) {
-	return q.r.codenames, nil
+func (r *Resolver) StubMutation(ctx context.Context) (bool, error) {
+	return true, nil
 }
 
-type mutationResolver struct {
-	r *Resolver
+func (r *Resolver) StubQuery(ctx context.Context) (bool, error) {
+	return true, nil
 }
 
-func (q *mutationResolver) Codenames(ctx context.Context) (*codenames.Game, error) {
-	return q.r.codenames, nil
+func (r *Resolver) StubSubscription(ctx context.Context) (<-chan bool, error) {
+	return make(chan bool), nil
 }

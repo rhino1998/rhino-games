@@ -1,8 +1,15 @@
-type CodeNames {
-  board(category: String!, code: String!): Board
-  categories: [String!]!
-  newGame(category: String!, code: String!, x: Int!, y: Int!): Boolean!
-  hitTile(category: String!, code: String!, x: Int!, y: Int!): TileType!
+
+extend type Query {
+  codenames_categories: [String!]!
+}
+
+extend type Mutation {
+  codenames_newGame(category: String!, code: String!, x: Int!, y: Int!): Boolean!
+  codenames_hitTile(category: String!, code: String!, x: Int!, y: Int!): TileType!
+}
+
+extend type Subscription {
+  codenames_board(category: String!, code: String!): Board
 }
 
 enum TileType {

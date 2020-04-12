@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	log "log"
+	"math/rand"
 	http "net/http"
 	os "os"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/kelseyhightower/envconfig"
 	"github.com/rhino1998/codenames/games"
 	"github.com/rhino1998/codenames/games/codenames"
+	"github.com/rhino1998/codenames/games/liarspoker"
 	"gopkg.in/mcuadros/go-defaults.v1"
 	"gopkg.in/yaml.v2"
 
@@ -57,6 +59,9 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func main() {
+
+	rand.Seed(time.Now().UnixNano())
+
 	var configPath string
 	if len(os.Args) == 1 {
 		configPath = "config.yaml"
@@ -84,7 +89,12 @@ func main() {
 		log.Fatalf("codenames: %v", err)
 	}
 
-	res := games.New(cn)
+	lp, err := liarspoker.New()
+	if err != nil {
+		log.Fatalf("liarspoker: %v", err)
+	}
+
+	res := games.New(cn, lp)
 
 	router.Handle("/", handler.Playground("GraphQL playground", "/graphql"))
 	router.Handle("/graphql",

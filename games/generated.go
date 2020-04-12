@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -13,6 +15,8 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/introspection"
 	"github.com/rhino1998/codenames/games/codenames"
+	"github.com/rhino1998/codenames/games/common/playingcard"
+	"github.com/rhino1998/codenames/games/liarspoker"
 	gqlparser "github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
 )
@@ -37,6 +41,7 @@ type Config struct {
 type ResolverRoot interface {
 	Mutation() MutationResolver
 	Query() QueryResolver
+	Subscription() SubscriptionResolver
 }
 
 type DirectiveRoot struct {
@@ -47,19 +52,85 @@ type ComplexityRoot struct {
 		Tiles func(childComplexity int) int
 	}
 
-	CodeNames struct {
-		Board      func(childComplexity int, category string, code string) int
-		Categories func(childComplexity int) int
-		HitTile    func(childComplexity int, category string, code string, x int, y int) int
-		NewGame    func(childComplexity int, category string, code string, x int, y int) int
+	LiarsPokerCard struct {
+		Suit  func(childComplexity int) int
+		Value func(childComplexity int) int
+	}
+
+	LiarsPokerCardStatus struct {
+		Present func(childComplexity int) int
+		Suit    func(childComplexity int) int
+		Value   func(childComplexity int) int
+	}
+
+	LiarsPokerLobby struct {
+		CallSize func(childComplexity int) int
+		NumCards func(childComplexity int) int
+		NumDecks func(childComplexity int) int
+		Players  func(childComplexity int) int
+	}
+
+	LiarsPokerPlayer struct {
+		Current      func(childComplexity int) int
+		Name         func(childComplexity int) int
+		PrivateCards func(childComplexity int) int
+		PublicCards  func(childComplexity int) int
+		Ready        func(childComplexity int) int
+		TotalCards   func(childComplexity int) int
+	}
+
+	LiarsPokerPlayerCall struct {
+		Call   func(childComplexity int) int
+		Player func(childComplexity int) int
+	}
+
+	LiarsPokerPlayerCallStatus struct {
+		Call   func(childComplexity int) int
+		Exists func(childComplexity int) int
+		Player func(childComplexity int) int
+	}
+
+	LiarsPokerRound struct {
+		CallSize      func(childComplexity int) int
+		Calls         func(childComplexity int) int
+		CurrentPlayer func(childComplexity int) int
+		Others        func(childComplexity int) int
+		Player        func(childComplexity int) int
+	}
+
+	LiarsPokerRoundSummary struct {
+		Calls  func(childComplexity int) int
+		Loser  func(childComplexity int) int
+		Others func(childComplexity int) int
+		Player func(childComplexity int) int
+		Winner func(childComplexity int) int
 	}
 
 	Mutation struct {
-		Codenames func(childComplexity int) int
+		CodenamesHitTile      func(childComplexity int, category string, code string, x int, y int) int
+		CodenamesNewGame      func(childComplexity int, category string, code string, x int, y int) int
+		LiarspokerCall        func(childComplexity int, code string, player string, call []*liarspoker.Card) int
+		LiarspokerReady       func(childComplexity int, code string, player string) int
+		LiarspokerSetCallSize func(childComplexity int, code string, callSize int) int
+		LiarspokerSetNumCards func(childComplexity int, code string, numCards int) int
+		LiarspokerSetNumDecks func(childComplexity int, code string, numDecks int) int
+		StubMutation          func(childComplexity int) int
+	}
+
+	PlayingCard struct {
+		Suit  func(childComplexity int) int
+		Value func(childComplexity int) int
 	}
 
 	Query struct {
-		Codenames func(childComplexity int) int
+		CodenamesCategories func(childComplexity int) int
+		StubQuery           func(childComplexity int) int
+	}
+
+	Subscription struct {
+		CodenamesBoard   func(childComplexity int, category string, code string) int
+		LiarspokerState  func(childComplexity int, code string, player *string) int
+		StubSubscription func(childComplexity int) int
 	}
 
 	Tile struct {
@@ -70,10 +141,23 @@ type ComplexityRoot struct {
 }
 
 type MutationResolver interface {
-	Codenames(ctx context.Context) (*codenames.Game, error)
+	StubMutation(ctx context.Context) (bool, error)
+	CodenamesNewGame(ctx context.Context, category string, code string, x int, y int) (bool, error)
+	CodenamesHitTile(ctx context.Context, category string, code string, x int, y int) (codenames.TileType, error)
+	LiarspokerReady(ctx context.Context, code string, player string) (bool, error)
+	LiarspokerSetNumCards(ctx context.Context, code string, numCards int) (int, error)
+	LiarspokerSetNumDecks(ctx context.Context, code string, numDecks int) (int, error)
+	LiarspokerSetCallSize(ctx context.Context, code string, callSize int) (int, error)
+	LiarspokerCall(ctx context.Context, code string, player string, call []*liarspoker.Card) (bool, error)
 }
 type QueryResolver interface {
-	Codenames(ctx context.Context) (*codenames.Game, error)
+	StubQuery(ctx context.Context) (bool, error)
+	CodenamesCategories(ctx context.Context) ([]string, error)
+}
+type SubscriptionResolver interface {
+	StubSubscription(ctx context.Context) (<-chan bool, error)
+	CodenamesBoard(ctx context.Context, category string, code string) (<-chan *codenames.Board, error)
+	LiarspokerState(ctx context.Context, code string, player *string) (<-chan liarspoker.State, error)
 }
 
 type executableSchema struct {
@@ -98,62 +182,365 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.Board.Tiles(childComplexity), true
 
-	case "CodeNames.board":
-		if e.complexity.CodeNames.Board == nil {
+	case "LiarsPokerCard.suit":
+		if e.complexity.LiarsPokerCard.Suit == nil {
 			break
 		}
 
-		args, err := ec.field_CodeNames_board_args(context.TODO(), rawArgs)
+		return e.complexity.LiarsPokerCard.Suit(childComplexity), true
+
+	case "LiarsPokerCard.value":
+		if e.complexity.LiarsPokerCard.Value == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerCard.Value(childComplexity), true
+
+	case "LiarsPokerCardStatus.present":
+		if e.complexity.LiarsPokerCardStatus.Present == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerCardStatus.Present(childComplexity), true
+
+	case "LiarsPokerCardStatus.suit":
+		if e.complexity.LiarsPokerCardStatus.Suit == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerCardStatus.Suit(childComplexity), true
+
+	case "LiarsPokerCardStatus.value":
+		if e.complexity.LiarsPokerCardStatus.Value == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerCardStatus.Value(childComplexity), true
+
+	case "LiarsPokerLobby.callSize":
+		if e.complexity.LiarsPokerLobby.CallSize == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerLobby.CallSize(childComplexity), true
+
+	case "LiarsPokerLobby.numCards":
+		if e.complexity.LiarsPokerLobby.NumCards == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerLobby.NumCards(childComplexity), true
+
+	case "LiarsPokerLobby.numDecks":
+		if e.complexity.LiarsPokerLobby.NumDecks == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerLobby.NumDecks(childComplexity), true
+
+	case "LiarsPokerLobby.players":
+		if e.complexity.LiarsPokerLobby.Players == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerLobby.Players(childComplexity), true
+
+	case "LiarsPokerPlayer.current":
+		if e.complexity.LiarsPokerPlayer.Current == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayer.Current(childComplexity), true
+
+	case "LiarsPokerPlayer.name":
+		if e.complexity.LiarsPokerPlayer.Name == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayer.Name(childComplexity), true
+
+	case "LiarsPokerPlayer.privateCards":
+		if e.complexity.LiarsPokerPlayer.PrivateCards == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayer.PrivateCards(childComplexity), true
+
+	case "LiarsPokerPlayer.publicCards":
+		if e.complexity.LiarsPokerPlayer.PublicCards == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayer.PublicCards(childComplexity), true
+
+	case "LiarsPokerPlayer.ready":
+		if e.complexity.LiarsPokerPlayer.Ready == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayer.Ready(childComplexity), true
+
+	case "LiarsPokerPlayer.totalCards":
+		if e.complexity.LiarsPokerPlayer.TotalCards == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayer.TotalCards(childComplexity), true
+
+	case "LiarsPokerPlayerCall.call":
+		if e.complexity.LiarsPokerPlayerCall.Call == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayerCall.Call(childComplexity), true
+
+	case "LiarsPokerPlayerCall.player":
+		if e.complexity.LiarsPokerPlayerCall.Player == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayerCall.Player(childComplexity), true
+
+	case "LiarsPokerPlayerCallStatus.call":
+		if e.complexity.LiarsPokerPlayerCallStatus.Call == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayerCallStatus.Call(childComplexity), true
+
+	case "LiarsPokerPlayerCallStatus.exists":
+		if e.complexity.LiarsPokerPlayerCallStatus.Exists == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayerCallStatus.Exists(childComplexity), true
+
+	case "LiarsPokerPlayerCallStatus.player":
+		if e.complexity.LiarsPokerPlayerCallStatus.Player == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerPlayerCallStatus.Player(childComplexity), true
+
+	case "LiarsPokerRound.callSize":
+		if e.complexity.LiarsPokerRound.CallSize == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRound.CallSize(childComplexity), true
+
+	case "LiarsPokerRound.calls":
+		if e.complexity.LiarsPokerRound.Calls == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRound.Calls(childComplexity), true
+
+	case "LiarsPokerRound.currentPlayer":
+		if e.complexity.LiarsPokerRound.CurrentPlayer == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRound.CurrentPlayer(childComplexity), true
+
+	case "LiarsPokerRound.others":
+		if e.complexity.LiarsPokerRound.Others == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRound.Others(childComplexity), true
+
+	case "LiarsPokerRound.player":
+		if e.complexity.LiarsPokerRound.Player == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRound.Player(childComplexity), true
+
+	case "LiarsPokerRoundSummary.calls":
+		if e.complexity.LiarsPokerRoundSummary.Calls == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRoundSummary.Calls(childComplexity), true
+
+	case "LiarsPokerRoundSummary.loser":
+		if e.complexity.LiarsPokerRoundSummary.Loser == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRoundSummary.Loser(childComplexity), true
+
+	case "LiarsPokerRoundSummary.others":
+		if e.complexity.LiarsPokerRoundSummary.Others == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRoundSummary.Others(childComplexity), true
+
+	case "LiarsPokerRoundSummary.player":
+		if e.complexity.LiarsPokerRoundSummary.Player == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRoundSummary.Player(childComplexity), true
+
+	case "LiarsPokerRoundSummary.winner":
+		if e.complexity.LiarsPokerRoundSummary.Winner == nil {
+			break
+		}
+
+		return e.complexity.LiarsPokerRoundSummary.Winner(childComplexity), true
+
+	case "Mutation.codenames_hitTile":
+		if e.complexity.Mutation.CodenamesHitTile == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_codenames_hitTile_args(context.TODO(), rawArgs)
 		if err != nil {
 			return 0, false
 		}
 
-		return e.complexity.CodeNames.Board(childComplexity, args["category"].(string), args["code"].(string)), true
+		return e.complexity.Mutation.CodenamesHitTile(childComplexity, args["category"].(string), args["code"].(string), args["x"].(int), args["y"].(int)), true
 
-	case "CodeNames.categories":
-		if e.complexity.CodeNames.Categories == nil {
+	case "Mutation.codenames_newGame":
+		if e.complexity.Mutation.CodenamesNewGame == nil {
 			break
 		}
 
-		return e.complexity.CodeNames.Categories(childComplexity), true
-
-	case "CodeNames.hitTile":
-		if e.complexity.CodeNames.HitTile == nil {
-			break
-		}
-
-		args, err := ec.field_CodeNames_hitTile_args(context.TODO(), rawArgs)
+		args, err := ec.field_Mutation_codenames_newGame_args(context.TODO(), rawArgs)
 		if err != nil {
 			return 0, false
 		}
 
-		return e.complexity.CodeNames.HitTile(childComplexity, args["category"].(string), args["code"].(string), args["x"].(int), args["y"].(int)), true
+		return e.complexity.Mutation.CodenamesNewGame(childComplexity, args["category"].(string), args["code"].(string), args["x"].(int), args["y"].(int)), true
 
-	case "CodeNames.newGame":
-		if e.complexity.CodeNames.NewGame == nil {
+	case "Mutation.liarspoker_call":
+		if e.complexity.Mutation.LiarspokerCall == nil {
 			break
 		}
 
-		args, err := ec.field_CodeNames_newGame_args(context.TODO(), rawArgs)
+		args, err := ec.field_Mutation_liarspoker_call_args(context.TODO(), rawArgs)
 		if err != nil {
 			return 0, false
 		}
 
-		return e.complexity.CodeNames.NewGame(childComplexity, args["category"].(string), args["code"].(string), args["x"].(int), args["y"].(int)), true
+		return e.complexity.Mutation.LiarspokerCall(childComplexity, args["code"].(string), args["player"].(string), args["call"].([]*liarspoker.Card)), true
 
-	case "Mutation.codenames":
-		if e.complexity.Mutation.Codenames == nil {
+	case "Mutation.liarspoker_ready":
+		if e.complexity.Mutation.LiarspokerReady == nil {
 			break
 		}
 
-		return e.complexity.Mutation.Codenames(childComplexity), true
+		args, err := ec.field_Mutation_liarspoker_ready_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
 
-	case "Query.codenames":
-		if e.complexity.Query.Codenames == nil {
+		return e.complexity.Mutation.LiarspokerReady(childComplexity, args["code"].(string), args["player"].(string)), true
+
+	case "Mutation.liarspoker_setCallSize":
+		if e.complexity.Mutation.LiarspokerSetCallSize == nil {
 			break
 		}
 
-		return e.complexity.Query.Codenames(childComplexity), true
+		args, err := ec.field_Mutation_liarspoker_setCallSize_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.LiarspokerSetCallSize(childComplexity, args["code"].(string), args["callSize"].(int)), true
+
+	case "Mutation.liarspoker_setNumCards":
+		if e.complexity.Mutation.LiarspokerSetNumCards == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_liarspoker_setNumCards_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.LiarspokerSetNumCards(childComplexity, args["code"].(string), args["numCards"].(int)), true
+
+	case "Mutation.liarspoker_setNumDecks":
+		if e.complexity.Mutation.LiarspokerSetNumDecks == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_liarspoker_setNumDecks_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.LiarspokerSetNumDecks(childComplexity, args["code"].(string), args["numDecks"].(int)), true
+
+	case "Mutation.stub_mutation":
+		if e.complexity.Mutation.StubMutation == nil {
+			break
+		}
+
+		return e.complexity.Mutation.StubMutation(childComplexity), true
+
+	case "PlayingCard.suit":
+		if e.complexity.PlayingCard.Suit == nil {
+			break
+		}
+
+		return e.complexity.PlayingCard.Suit(childComplexity), true
+
+	case "PlayingCard.value":
+		if e.complexity.PlayingCard.Value == nil {
+			break
+		}
+
+		return e.complexity.PlayingCard.Value(childComplexity), true
+
+	case "Query.codenames_categories":
+		if e.complexity.Query.CodenamesCategories == nil {
+			break
+		}
+
+		return e.complexity.Query.CodenamesCategories(childComplexity), true
+
+	case "Query.stub_query":
+		if e.complexity.Query.StubQuery == nil {
+			break
+		}
+
+		return e.complexity.Query.StubQuery(childComplexity), true
+
+	case "Subscription.codenames_board":
+		if e.complexity.Subscription.CodenamesBoard == nil {
+			break
+		}
+
+		args, err := ec.field_Subscription_codenames_board_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Subscription.CodenamesBoard(childComplexity, args["category"].(string), args["code"].(string)), true
+
+	case "Subscription.liarspoker_state":
+		if e.complexity.Subscription.LiarspokerState == nil {
+			break
+		}
+
+		args, err := ec.field_Subscription_liarspoker_state_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Subscription.LiarspokerState(childComplexity, args["code"].(string), args["player"].(*string)), true
+
+	case "Subscription.stub_subscription":
+		if e.complexity.Subscription.StubSubscription == nil {
+			break
+		}
+
+		return e.complexity.Subscription.StubSubscription(childComplexity), true
 
 	case "Tile.kind":
 		if e.complexity.Tile.Kind == nil {
@@ -214,6 +601,23 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 				Data: buf.Bytes(),
 			}
 		}
+	case ast.Subscription:
+		next := ec._Subscription(ctx, rc.Operation.SelectionSet)
+
+		var buf bytes.Buffer
+		return func(ctx context.Context) *graphql.Response {
+			buf.Reset()
+			data := next()
+
+			if data == nil {
+				return nil
+			}
+			data.MarshalGQL(&buf)
+
+			return &graphql.Response{
+				Data: buf.Bytes(),
+			}
+		}
 
 	default:
 		return graphql.OneShot(graphql.ErrorResponse(ctx, "unsupported GraphQL operation"))
@@ -243,22 +647,33 @@ var sources = []*ast.Source{
 	&ast.Source{Name: "games/schema.graphql", Input: `schema {
   query: Query
   mutation: Mutation
+  subscription: Subscription
 }
 
 type Mutation {
-  codenames: CodeNames!
+  stub_mutation: Boolean!
 }
 
 type Query {
-  codenames: CodeNames!
+  stub_query: Boolean!
 }
 
+type Subscription {
+  stub_subscription: Boolean!
+}
 `, BuiltIn: false},
-	&ast.Source{Name: "games/codenames/schema.graphql", Input: `type CodeNames {
-  board(category: String!, code: String!): Board
-  categories: [String!]!
-  newGame(category: String!, code: String!, x: Int!, y: Int!): Boolean!
-  hitTile(category: String!, code: String!, x: Int!, y: Int!): TileType!
+	&ast.Source{Name: "games/codenames/schema.graphql", Input: `
+extend type Query {
+  codenames_categories: [String!]!
+}
+
+extend type Mutation {
+  codenames_newGame(category: String!, code: String!, x: Int!, y: Int!): Boolean!
+  codenames_hitTile(category: String!, code: String!, x: Int!, y: Int!): TileType!
+}
+
+extend type Subscription {
+  codenames_board(category: String!, code: String!): Board
 }
 
 enum TileType {
@@ -280,6 +695,155 @@ type Tile {
   word: String!
 }
 `, BuiltIn: false},
+	&ast.Source{Name: "games/common/playingcard/schema.graphql", Input: `type PlayingCard {
+  suit: PlayingCardSuit!
+  value: PlayingCardValue!
+
+}
+
+input PlayingCardInput {
+  suit: PlayingCardSuit!
+  value: PlayingCardValue!
+}
+
+enum PlayingCardValue  {
+  WILD
+  ACE
+  TWO
+  THREE
+  FOUR
+  FIVE
+  SIX
+  SEVEN
+  EIGHT
+  NINE
+  TEN
+  JACK
+  QUEEN
+  KING
+}
+
+enum PlayingCardSuit {
+  WILD
+  CLUBS
+  DIAMONDS
+  HEARTS
+  SPADES
+}
+`, BuiltIn: false},
+	&ast.Source{Name: "games/liarspoker/schema.graphql", Input: `extend type Mutation {
+  liarspoker_ready(code: String!, player: String!): Boolean!
+  liarspoker_setNumCards(code: String!, numCards: Int!): Int!
+  liarspoker_setNumDecks(code: String!, numDecks: Int!): Int!
+  liarspoker_setCallSize(code: String!, callSize: Int!): Int!
+
+  liarspoker_call(code: String!, player: String!, call: [LiarsPokerCardInput!]): Boolean!
+  # liarspoker_nextHand(code: String!, player: String!): Boolean!
+}
+
+extend type Subscription {
+  liarspoker_state(code: String!, player: String): LiarsPokerState!
+}
+
+union LiarsPokerState = LiarsPokerLobby | LiarsPokerRound | LiarsPokerRoundSummary
+
+type LiarsPokerLobby {
+  players: [LiarsPokerPlayer!]!
+  numCards: Int!
+  numDecks: Int!
+  callSize: Int!
+}
+
+type LiarsPokerRound {
+  callSize: Int!
+
+  player: LiarsPokerPlayer
+  others: [LiarsPokerPlayer!]!
+  currentPlayer: LiarsPokerPlayer!
+
+  calls: [LiarsPokerPlayerCall!]!
+}
+
+type LiarsPokerRoundSummary {
+  player: LiarsPokerPlayer
+  others: [LiarsPokerPlayer!]!
+  winner: LiarsPokerPlayer!
+  loser: LiarsPokerPlayer!
+
+  calls: [LiarsPokerPlayerCallStatus!]!
+}
+
+type LiarsPokerPlayer {
+  name: String!
+  privateCards: [LiarsPokerCard!]!
+  publicCards: [LiarsPokerCard!]!
+  totalCards: Int!
+  current: Boolean!
+  ready: Boolean!
+}
+
+type LiarsPokerPlayerCall {
+  player: LiarsPokerPlayer!
+  call: [LiarsPokerCard!]!
+}
+
+type LiarsPokerPlayerCallStatus {
+  player: LiarsPokerPlayer!
+  call: [LiarsPokerCardStatus!]!
+
+  exists: Boolean!
+}
+
+input LiarsPokerPlayerCallInput {
+  player: String!
+  call: [LiarsPokerCardInput!]
+}
+
+type LiarsPokerCard {
+  suit: LiarsPokerCardSuit!
+  value: LiarsPokerCardValue!
+}
+
+input LiarsPokerCardInput {
+  suit: LiarsPokerCardSuit!
+  value: LiarsPokerCardValue!
+}
+
+type LiarsPokerCardStatus {
+  suit: LiarsPokerCardSuit!
+  value: LiarsPokerCardValue!
+  present: Boolean!
+}
+
+
+enum LiarsPokerCardValue  {
+  WILD
+  ZERO
+  ONE
+  TWO
+  THREE
+  FOUR
+  FIVE
+  SIX
+  SEVEN
+  EIGHT
+  NINE
+  TEN
+  ELEVEN
+  JACK
+  QUEEN
+  KING
+  ACE
+}
+
+enum LiarsPokerCardSuit {
+  WILD
+  CLUBS
+  DIAMONDS
+  HEARTS
+  SPADES
+}
+`, BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
@@ -287,29 +851,7 @@ var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
 // region    ***************************** args.gotpl *****************************
 
-func (ec *executionContext) field_CodeNames_board_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
-	var err error
-	args := map[string]interface{}{}
-	var arg0 string
-	if tmp, ok := rawArgs["category"]; ok {
-		arg0, err = ec.unmarshalNString2string(ctx, tmp)
-		if err != nil {
-			return nil, err
-		}
-	}
-	args["category"] = arg0
-	var arg1 string
-	if tmp, ok := rawArgs["code"]; ok {
-		arg1, err = ec.unmarshalNString2string(ctx, tmp)
-		if err != nil {
-			return nil, err
-		}
-	}
-	args["code"] = arg1
-	return args, nil
-}
-
-func (ec *executionContext) field_CodeNames_hitTile_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+func (ec *executionContext) field_Mutation_codenames_hitTile_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
 	var err error
 	args := map[string]interface{}{}
 	var arg0 string
@@ -347,7 +889,7 @@ func (ec *executionContext) field_CodeNames_hitTile_args(ctx context.Context, ra
 	return args, nil
 }
 
-func (ec *executionContext) field_CodeNames_newGame_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+func (ec *executionContext) field_Mutation_codenames_newGame_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
 	var err error
 	args := map[string]interface{}{}
 	var arg0 string
@@ -382,6 +924,124 @@ func (ec *executionContext) field_CodeNames_newGame_args(ctx context.Context, ra
 		}
 	}
 	args["y"] = arg3
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_liarspoker_call_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 string
+	if tmp, ok := rawArgs["code"]; ok {
+		arg0, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["code"] = arg0
+	var arg1 string
+	if tmp, ok := rawArgs["player"]; ok {
+		arg1, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["player"] = arg1
+	var arg2 []*liarspoker.Card
+	if tmp, ok := rawArgs["call"]; ok {
+		arg2, err = ec.unmarshalOLiarsPokerCardInput2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCardᚄ(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["call"] = arg2
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_liarspoker_ready_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 string
+	if tmp, ok := rawArgs["code"]; ok {
+		arg0, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["code"] = arg0
+	var arg1 string
+	if tmp, ok := rawArgs["player"]; ok {
+		arg1, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["player"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_liarspoker_setCallSize_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 string
+	if tmp, ok := rawArgs["code"]; ok {
+		arg0, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["code"] = arg0
+	var arg1 int
+	if tmp, ok := rawArgs["callSize"]; ok {
+		arg1, err = ec.unmarshalNInt2int(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["callSize"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_liarspoker_setNumCards_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 string
+	if tmp, ok := rawArgs["code"]; ok {
+		arg0, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["code"] = arg0
+	var arg1 int
+	if tmp, ok := rawArgs["numCards"]; ok {
+		arg1, err = ec.unmarshalNInt2int(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["numCards"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_liarspoker_setNumDecks_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 string
+	if tmp, ok := rawArgs["code"]; ok {
+		arg0, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["code"] = arg0
+	var arg1 int
+	if tmp, ok := rawArgs["numDecks"]; ok {
+		arg1, err = ec.unmarshalNInt2int(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["numDecks"] = arg1
 	return args, nil
 }
 
@@ -396,6 +1056,50 @@ func (ec *executionContext) field_Query___type_args(ctx context.Context, rawArgs
 		}
 	}
 	args["name"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Subscription_codenames_board_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 string
+	if tmp, ok := rawArgs["category"]; ok {
+		arg0, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["category"] = arg0
+	var arg1 string
+	if tmp, ok := rawArgs["code"]; ok {
+		arg1, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["code"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Subscription_liarspoker_state_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 string
+	if tmp, ok := rawArgs["code"]; ok {
+		arg0, err = ec.unmarshalNString2string(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["code"] = arg0
+	var arg1 *string
+	if tmp, ok := rawArgs["player"]; ok {
+		arg1, err = ec.unmarshalOString2ᚖstring(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["player"] = arg1
 	return args, nil
 }
 
@@ -469,7 +1173,7 @@ func (ec *executionContext) _Board_tiles(ctx context.Context, field graphql.Coll
 	return ec.marshalNTile2ᚕᚕgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcodenamesᚐTileᚄ(ctx, field.Selections, res)
 }
 
-func (ec *executionContext) _CodeNames_board(ctx context.Context, field graphql.CollectedField, obj *codenames.Game) (ret graphql.Marshaler) {
+func (ec *executionContext) _LiarsPokerCard_suit(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Card) (ret graphql.Marshaler) {
 	defer func() {
 		if r := recover(); r != nil {
 			ec.Error(ctx, ec.Recover(ctx, r))
@@ -477,54 +1181,16 @@ func (ec *executionContext) _CodeNames_board(ctx context.Context, field graphql.
 		}
 	}()
 	fc := &graphql.FieldContext{
-		Object:   "CodeNames",
+		Object:   "LiarsPokerCard",
 		Field:    field,
 		Args:     nil,
-		IsMethod: true,
-	}
-
-	ctx = graphql.WithFieldContext(ctx, fc)
-	rawArgs := field.ArgumentMap(ec.Variables)
-	args, err := ec.field_CodeNames_board_args(ctx, rawArgs)
-	if err != nil {
-		ec.Error(ctx, err)
-		return graphql.Null
-	}
-	fc.Args = args
-	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
-		ctx = rctx // use context from middleware stack in children
-		return obj.Board(ctx, args["category"].(string), args["code"].(string))
-	})
-	if err != nil {
-		ec.Error(ctx, err)
-		return graphql.Null
-	}
-	if resTmp == nil {
-		return graphql.Null
-	}
-	res := resTmp.(*codenames.Board)
-	fc.Result = res
-	return ec.marshalOBoard2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcodenamesᚐBoard(ctx, field.Selections, res)
-}
-
-func (ec *executionContext) _CodeNames_categories(ctx context.Context, field graphql.CollectedField, obj *codenames.Game) (ret graphql.Marshaler) {
-	defer func() {
-		if r := recover(); r != nil {
-			ec.Error(ctx, ec.Recover(ctx, r))
-			ret = graphql.Null
-		}
-	}()
-	fc := &graphql.FieldContext{
-		Object:   "CodeNames",
-		Field:    field,
-		Args:     nil,
-		IsMethod: true,
+		IsMethod: false,
 	}
 
 	ctx = graphql.WithFieldContext(ctx, fc)
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return obj.Categories(ctx)
+		return obj.Suit, nil
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -536,12 +1202,12 @@ func (ec *executionContext) _CodeNames_categories(ctx context.Context, field gra
 		}
 		return graphql.Null
 	}
-	res := resTmp.([]string)
+	res := resTmp.(liarspoker.Suit)
 	fc.Result = res
-	return ec.marshalNString2ᚕstringᚄ(ctx, field.Selections, res)
+	return ec.marshalNLiarsPokerCardSuit2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐSuit(ctx, field.Selections, res)
 }
 
-func (ec *executionContext) _CodeNames_newGame(ctx context.Context, field graphql.CollectedField, obj *codenames.Game) (ret graphql.Marshaler) {
+func (ec *executionContext) _LiarsPokerCard_value(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Card) (ret graphql.Marshaler) {
 	defer func() {
 		if r := recover(); r != nil {
 			ec.Error(ctx, ec.Recover(ctx, r))
@@ -549,23 +1215,118 @@ func (ec *executionContext) _CodeNames_newGame(ctx context.Context, field graphq
 		}
 	}()
 	fc := &graphql.FieldContext{
-		Object:   "CodeNames",
+		Object:   "LiarsPokerCard",
 		Field:    field,
 		Args:     nil,
-		IsMethod: true,
+		IsMethod: false,
 	}
 
 	ctx = graphql.WithFieldContext(ctx, fc)
-	rawArgs := field.ArgumentMap(ec.Variables)
-	args, err := ec.field_CodeNames_newGame_args(ctx, rawArgs)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Value, nil
+	})
 	if err != nil {
 		ec.Error(ctx, err)
 		return graphql.Null
 	}
-	fc.Args = args
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(liarspoker.Value)
+	fc.Result = res
+	return ec.marshalNLiarsPokerCardValue2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐValue(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerCardStatus_suit(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Card) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerCardStatus",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return obj.NewGame(ctx, args["category"].(string), args["code"].(string), args["x"].(int), args["y"].(int))
+		return obj.Suit, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(liarspoker.Suit)
+	fc.Result = res
+	return ec.marshalNLiarsPokerCardSuit2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐSuit(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerCardStatus_value(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Card) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerCardStatus",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Value, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(liarspoker.Value)
+	fc.Result = res
+	return ec.marshalNLiarsPokerCardValue2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐValue(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerCardStatus_present(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Card) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerCardStatus",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Present, nil
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -582,7 +1343,7 @@ func (ec *executionContext) _CodeNames_newGame(ctx context.Context, field graphq
 	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
 }
 
-func (ec *executionContext) _CodeNames_hitTile(ctx context.Context, field graphql.CollectedField, obj *codenames.Game) (ret graphql.Marshaler) {
+func (ec *executionContext) _LiarsPokerLobby_players(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Lobby) (ret graphql.Marshaler) {
 	defer func() {
 		if r := recover(); r != nil {
 			ec.Error(ctx, ec.Recover(ctx, r))
@@ -590,23 +1351,16 @@ func (ec *executionContext) _CodeNames_hitTile(ctx context.Context, field graphq
 		}
 	}()
 	fc := &graphql.FieldContext{
-		Object:   "CodeNames",
+		Object:   "LiarsPokerLobby",
 		Field:    field,
 		Args:     nil,
 		IsMethod: true,
 	}
 
 	ctx = graphql.WithFieldContext(ctx, fc)
-	rawArgs := field.ArgumentMap(ec.Variables)
-	args, err := ec.field_CodeNames_hitTile_args(ctx, rawArgs)
-	if err != nil {
-		ec.Error(ctx, err)
-		return graphql.Null
-	}
-	fc.Args = args
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return obj.HitTile(ctx, args["category"].(string), args["code"].(string), args["x"].(int), args["y"].(int))
+		return obj.Players(), nil
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -618,12 +1372,822 @@ func (ec *executionContext) _CodeNames_hitTile(ctx context.Context, field graphq
 		}
 		return graphql.Null
 	}
-	res := resTmp.(codenames.TileType)
+	res := resTmp.([]*liarspoker.Player)
 	fc.Result = res
-	return ec.marshalNTileType2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcodenamesᚐTileType(ctx, field.Selections, res)
+	return ec.marshalNLiarsPokerPlayer2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerᚄ(ctx, field.Selections, res)
 }
 
-func (ec *executionContext) _Mutation_codenames(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+func (ec *executionContext) _LiarsPokerLobby_numCards(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Lobby) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerLobby",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.NumCards(), nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerLobby_numDecks(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Lobby) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerLobby",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.NumDecks(), nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerLobby_callSize(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Lobby) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerLobby",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.CallSize(), nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayer_name(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Player) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayer",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Name, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(string)
+	fc.Result = res
+	return ec.marshalNString2string(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayer_privateCards(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Player) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayer",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.PrivateCards, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]*liarspoker.Card)
+	fc.Result = res
+	return ec.marshalNLiarsPokerCard2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCardᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayer_publicCards(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Player) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayer",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.PublicCards, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]*liarspoker.Card)
+	fc.Result = res
+	return ec.marshalNLiarsPokerCard2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCardᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayer_totalCards(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Player) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayer",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.TotalCards(), nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayer_current(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Player) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayer",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Current, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayer_ready(ctx context.Context, field graphql.CollectedField, obj *liarspoker.Player) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayer",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Ready, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayerCall_player(ctx context.Context, field graphql.CollectedField, obj *liarspoker.PlayerCall) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayerCall",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Player(), nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(*liarspoker.Player)
+	fc.Result = res
+	return ec.marshalNLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayerCall_call(ctx context.Context, field graphql.CollectedField, obj *liarspoker.PlayerCall) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayerCall",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Call(), nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]*liarspoker.Card)
+	fc.Result = res
+	return ec.marshalNLiarsPokerCard2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCardᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayerCallStatus_player(ctx context.Context, field graphql.CollectedField, obj *liarspoker.PlayerCall) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayerCallStatus",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Player(), nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(*liarspoker.Player)
+	fc.Result = res
+	return ec.marshalNLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayerCallStatus_call(ctx context.Context, field graphql.CollectedField, obj *liarspoker.PlayerCall) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayerCallStatus",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Call(), nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]*liarspoker.Card)
+	fc.Result = res
+	return ec.marshalNLiarsPokerCardStatus2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCardᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerPlayerCallStatus_exists(ctx context.Context, field graphql.CollectedField, obj *liarspoker.PlayerCall) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerPlayerCallStatus",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Exists(), nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRound_callSize(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRound",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.CallSize, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRound_player(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRound",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Player, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(*liarspoker.Player)
+	fc.Result = res
+	return ec.marshalOLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRound_others(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRound",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Others, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]*liarspoker.Player)
+	fc.Result = res
+	return ec.marshalNLiarsPokerPlayer2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRound_currentPlayer(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRound",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.CurrentPlayer, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(*liarspoker.Player)
+	fc.Result = res
+	return ec.marshalNLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRound_calls(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRound",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Calls, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]*liarspoker.PlayerCall)
+	fc.Result = res
+	return ec.marshalNLiarsPokerPlayerCall2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCallᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRoundSummary_player(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundSummaryState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRoundSummary",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Player, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(*liarspoker.Player)
+	fc.Result = res
+	return ec.marshalOLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRoundSummary_others(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundSummaryState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRoundSummary",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Others, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]*liarspoker.Player)
+	fc.Result = res
+	return ec.marshalNLiarsPokerPlayer2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRoundSummary_winner(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundSummaryState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRoundSummary",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Winner, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(*liarspoker.Player)
+	fc.Result = res
+	return ec.marshalNLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRoundSummary_loser(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundSummaryState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRoundSummary",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Loser, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(*liarspoker.Player)
+	fc.Result = res
+	return ec.marshalNLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _LiarsPokerRoundSummary_calls(ctx context.Context, field graphql.CollectedField, obj *liarspoker.RoundSummaryState) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "LiarsPokerRoundSummary",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Calls, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]*liarspoker.PlayerCall)
+	fc.Result = res
+	return ec.marshalNLiarsPokerPlayerCallStatus2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCallᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Mutation_stub_mutation(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	defer func() {
 		if r := recover(); r != nil {
 			ec.Error(ctx, ec.Recover(ctx, r))
@@ -640,7 +2204,7 @@ func (ec *executionContext) _Mutation_codenames(ctx context.Context, field graph
 	ctx = graphql.WithFieldContext(ctx, fc)
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return ec.resolvers.Mutation().Codenames(rctx)
+		return ec.resolvers.Mutation().StubMutation(rctx)
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -652,12 +2216,367 @@ func (ec *executionContext) _Mutation_codenames(ctx context.Context, field graph
 		}
 		return graphql.Null
 	}
-	res := resTmp.(*codenames.Game)
+	res := resTmp.(bool)
 	fc.Result = res
-	return ec.marshalNCodeNames2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcodenamesᚐGame(ctx, field.Selections, res)
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
 }
 
-func (ec *executionContext) _Query_codenames(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+func (ec *executionContext) _Mutation_codenames_newGame(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Mutation",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Mutation_codenames_newGame_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().CodenamesNewGame(rctx, args["category"].(string), args["code"].(string), args["x"].(int), args["y"].(int))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Mutation_codenames_hitTile(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Mutation",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Mutation_codenames_hitTile_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().CodenamesHitTile(rctx, args["category"].(string), args["code"].(string), args["x"].(int), args["y"].(int))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(codenames.TileType)
+	fc.Result = res
+	return ec.marshalNTileType2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcodenamesᚐTileType(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Mutation_liarspoker_ready(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Mutation",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Mutation_liarspoker_ready_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().LiarspokerReady(rctx, args["code"].(string), args["player"].(string))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Mutation_liarspoker_setNumCards(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Mutation",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Mutation_liarspoker_setNumCards_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().LiarspokerSetNumCards(rctx, args["code"].(string), args["numCards"].(int))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Mutation_liarspoker_setNumDecks(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Mutation",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Mutation_liarspoker_setNumDecks_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().LiarspokerSetNumDecks(rctx, args["code"].(string), args["numDecks"].(int))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Mutation_liarspoker_setCallSize(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Mutation",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Mutation_liarspoker_setCallSize_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().LiarspokerSetCallSize(rctx, args["code"].(string), args["callSize"].(int))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Mutation_liarspoker_call(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Mutation",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Mutation_liarspoker_call_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().LiarspokerCall(rctx, args["code"].(string), args["player"].(string), args["call"].([]*liarspoker.Card))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _PlayingCard_suit(ctx context.Context, field graphql.CollectedField, obj *playingcard.Card) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "PlayingCard",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Suit, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(playingcard.Suit)
+	fc.Result = res
+	return ec.marshalNPlayingCardSuit2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcommonᚋplayingcardᚐSuit(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _PlayingCard_value(ctx context.Context, field graphql.CollectedField, obj *playingcard.Card) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "PlayingCard",
+		Field:    field,
+		Args:     nil,
+		IsMethod: false,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Value, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(playingcard.Value)
+	fc.Result = res
+	return ec.marshalNPlayingCardValue2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcommonᚋplayingcardᚐValue(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Query_stub_query(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	defer func() {
 		if r := recover(); r != nil {
 			ec.Error(ctx, ec.Recover(ctx, r))
@@ -674,7 +2593,7 @@ func (ec *executionContext) _Query_codenames(ctx context.Context, field graphql.
 	ctx = graphql.WithFieldContext(ctx, fc)
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return ec.resolvers.Query().Codenames(rctx)
+		return ec.resolvers.Query().StubQuery(rctx)
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -686,9 +2605,43 @@ func (ec *executionContext) _Query_codenames(ctx context.Context, field graphql.
 		}
 		return graphql.Null
 	}
-	res := resTmp.(*codenames.Game)
+	res := resTmp.(bool)
 	fc.Result = res
-	return ec.marshalNCodeNames2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcodenamesᚐGame(ctx, field.Selections, res)
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Query_codenames_categories(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Query",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Query().CodenamesCategories(rctx)
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]string)
+	fc.Result = res
+	return ec.marshalNString2ᚕstringᚄ(ctx, field.Selections, res)
 }
 
 func (ec *executionContext) _Query___type(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
@@ -758,6 +2711,149 @@ func (ec *executionContext) _Query___schema(ctx context.Context, field graphql.C
 	res := resTmp.(*introspection.Schema)
 	fc.Result = res
 	return ec.marshalO__Schema2ᚖgithubᚗcomᚋ99designsᚋgqlgenᚋgraphqlᚋintrospectionᚐSchema(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) _Subscription_stub_subscription(ctx context.Context, field graphql.CollectedField) (ret func() graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = nil
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Subscription",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Subscription().StubSubscription(rctx)
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return nil
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return nil
+	}
+	return func() graphql.Marshaler {
+		res, ok := <-resTmp.(<-chan bool)
+		if !ok {
+			return nil
+		}
+		return graphql.WriterFunc(func(w io.Writer) {
+			w.Write([]byte{'{'})
+			graphql.MarshalString(field.Alias).MarshalGQL(w)
+			w.Write([]byte{':'})
+			ec.marshalNBoolean2bool(ctx, field.Selections, res).MarshalGQL(w)
+			w.Write([]byte{'}'})
+		})
+	}
+}
+
+func (ec *executionContext) _Subscription_codenames_board(ctx context.Context, field graphql.CollectedField) (ret func() graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = nil
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Subscription",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Subscription_codenames_board_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return nil
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Subscription().CodenamesBoard(rctx, args["category"].(string), args["code"].(string))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return nil
+	}
+	if resTmp == nil {
+		return nil
+	}
+	return func() graphql.Marshaler {
+		res, ok := <-resTmp.(<-chan *codenames.Board)
+		if !ok {
+			return nil
+		}
+		return graphql.WriterFunc(func(w io.Writer) {
+			w.Write([]byte{'{'})
+			graphql.MarshalString(field.Alias).MarshalGQL(w)
+			w.Write([]byte{':'})
+			ec.marshalOBoard2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcodenamesᚐBoard(ctx, field.Selections, res).MarshalGQL(w)
+			w.Write([]byte{'}'})
+		})
+	}
+}
+
+func (ec *executionContext) _Subscription_liarspoker_state(ctx context.Context, field graphql.CollectedField) (ret func() graphql.Marshaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = nil
+		}
+	}()
+	fc := &graphql.FieldContext{
+		Object:   "Subscription",
+		Field:    field,
+		Args:     nil,
+		IsMethod: true,
+	}
+
+	ctx = graphql.WithFieldContext(ctx, fc)
+	rawArgs := field.ArgumentMap(ec.Variables)
+	args, err := ec.field_Subscription_liarspoker_state_args(ctx, rawArgs)
+	if err != nil {
+		ec.Error(ctx, err)
+		return nil
+	}
+	fc.Args = args
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Subscription().LiarspokerState(rctx, args["code"].(string), args["player"].(*string))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return nil
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return nil
+	}
+	return func() graphql.Marshaler {
+		res, ok := <-resTmp.(<-chan liarspoker.State)
+		if !ok {
+			return nil
+		}
+		return graphql.WriterFunc(func(w io.Writer) {
+			w.Write([]byte{'{'})
+			graphql.MarshalString(field.Alias).MarshalGQL(w)
+			w.Write([]byte{':'})
+			ec.marshalNLiarsPokerState2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐState(ctx, field.Selections, res).MarshalGQL(w)
+			w.Write([]byte{'}'})
+		})
+	}
 }
 
 func (ec *executionContext) _Tile_kind(ctx context.Context, field graphql.CollectedField, obj *codenames.Tile) (ret graphql.Marshaler) {
@@ -1917,9 +4013,109 @@ func (ec *executionContext) ___Type_ofType(ctx context.Context, field graphql.Co
 
 // region    **************************** input.gotpl *****************************
 
+func (ec *executionContext) unmarshalInputLiarsPokerCardInput(ctx context.Context, obj interface{}) (liarspoker.Card, error) {
+	var it liarspoker.Card
+	var asMap = obj.(map[string]interface{})
+
+	for k, v := range asMap {
+		switch k {
+		case "suit":
+			var err error
+			it.Suit, err = ec.unmarshalNLiarsPokerCardSuit2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐSuit(ctx, v)
+			if err != nil {
+				return it, err
+			}
+		case "value":
+			var err error
+			it.Value, err = ec.unmarshalNLiarsPokerCardValue2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐValue(ctx, v)
+			if err != nil {
+				return it, err
+			}
+		}
+	}
+
+	return it, nil
+}
+
+func (ec *executionContext) unmarshalInputLiarsPokerPlayerCallInput(ctx context.Context, obj interface{}) (LiarsPokerPlayerCallInput, error) {
+	var it LiarsPokerPlayerCallInput
+	var asMap = obj.(map[string]interface{})
+
+	for k, v := range asMap {
+		switch k {
+		case "player":
+			var err error
+			it.Player, err = ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+		case "call":
+			var err error
+			it.Call, err = ec.unmarshalOLiarsPokerCardInput2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCardᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+		}
+	}
+
+	return it, nil
+}
+
+func (ec *executionContext) unmarshalInputPlayingCardInput(ctx context.Context, obj interface{}) (playingcard.Card, error) {
+	var it playingcard.Card
+	var asMap = obj.(map[string]interface{})
+
+	for k, v := range asMap {
+		switch k {
+		case "suit":
+			var err error
+			it.Suit, err = ec.unmarshalNPlayingCardSuit2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcommonᚋplayingcardᚐSuit(ctx, v)
+			if err != nil {
+				return it, err
+			}
+		case "value":
+			var err error
+			it.Value, err = ec.unmarshalNPlayingCardValue2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcommonᚋplayingcardᚐValue(ctx, v)
+			if err != nil {
+				return it, err
+			}
+		}
+	}
+
+	return it, nil
+}
+
 // endregion **************************** input.gotpl *****************************
 
 // region    ************************** interface.gotpl ***************************
+
+func (ec *executionContext) _LiarsPokerState(ctx context.Context, sel ast.SelectionSet, obj liarspoker.State) graphql.Marshaler {
+	switch obj := (obj).(type) {
+	case nil:
+		return graphql.Null
+	case liarspoker.Lobby:
+		return ec._LiarsPokerLobby(ctx, sel, &obj)
+	case *liarspoker.Lobby:
+		if obj == nil {
+			return graphql.Null
+		}
+		return ec._LiarsPokerLobby(ctx, sel, obj)
+	case liarspoker.RoundState:
+		return ec._LiarsPokerRound(ctx, sel, &obj)
+	case *liarspoker.RoundState:
+		if obj == nil {
+			return graphql.Null
+		}
+		return ec._LiarsPokerRound(ctx, sel, obj)
+	case *liarspoker.RoundSummaryState:
+		if obj == nil {
+			return graphql.Null
+		}
+		return ec._LiarsPokerRoundSummary(ctx, sel, obj)
+	default:
+		panic(fmt.Errorf("unexpected type %T", obj))
+	}
+}
 
 // endregion ************************** interface.gotpl ***************************
 
@@ -1952,70 +4148,315 @@ func (ec *executionContext) _Board(ctx context.Context, sel ast.SelectionSet, ob
 	return out
 }
 
-var codeNamesImplementors = []string{"CodeNames"}
+var liarsPokerCardImplementors = []string{"LiarsPokerCard"}
 
-func (ec *executionContext) _CodeNames(ctx context.Context, sel ast.SelectionSet, obj *codenames.Game) graphql.Marshaler {
-	fields := graphql.CollectFields(ec.OperationContext, sel, codeNamesImplementors)
+func (ec *executionContext) _LiarsPokerCard(ctx context.Context, sel ast.SelectionSet, obj *liarspoker.Card) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, liarsPokerCardImplementors)
 
 	out := graphql.NewFieldSet(fields)
 	var invalids uint32
 	for i, field := range fields {
 		switch field.Name {
 		case "__typename":
-			out.Values[i] = graphql.MarshalString("CodeNames")
-		case "board":
-			field := field
-			out.Concurrently(i, func() (res graphql.Marshaler) {
-				defer func() {
-					if r := recover(); r != nil {
-						ec.Error(ctx, ec.Recover(ctx, r))
-					}
-				}()
-				res = ec._CodeNames_board(ctx, field, obj)
-				return res
-			})
-		case "categories":
-			field := field
-			out.Concurrently(i, func() (res graphql.Marshaler) {
-				defer func() {
-					if r := recover(); r != nil {
-						ec.Error(ctx, ec.Recover(ctx, r))
-					}
-				}()
-				res = ec._CodeNames_categories(ctx, field, obj)
-				if res == graphql.Null {
-					atomic.AddUint32(&invalids, 1)
-				}
-				return res
-			})
-		case "newGame":
-			field := field
-			out.Concurrently(i, func() (res graphql.Marshaler) {
-				defer func() {
-					if r := recover(); r != nil {
-						ec.Error(ctx, ec.Recover(ctx, r))
-					}
-				}()
-				res = ec._CodeNames_newGame(ctx, field, obj)
-				if res == graphql.Null {
-					atomic.AddUint32(&invalids, 1)
-				}
-				return res
-			})
-		case "hitTile":
-			field := field
-			out.Concurrently(i, func() (res graphql.Marshaler) {
-				defer func() {
-					if r := recover(); r != nil {
-						ec.Error(ctx, ec.Recover(ctx, r))
-					}
-				}()
-				res = ec._CodeNames_hitTile(ctx, field, obj)
-				if res == graphql.Null {
-					atomic.AddUint32(&invalids, 1)
-				}
-				return res
-			})
+			out.Values[i] = graphql.MarshalString("LiarsPokerCard")
+		case "suit":
+			out.Values[i] = ec._LiarsPokerCard_suit(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "value":
+			out.Values[i] = ec._LiarsPokerCard_value(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
+}
+
+var liarsPokerCardStatusImplementors = []string{"LiarsPokerCardStatus"}
+
+func (ec *executionContext) _LiarsPokerCardStatus(ctx context.Context, sel ast.SelectionSet, obj *liarspoker.Card) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, liarsPokerCardStatusImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("LiarsPokerCardStatus")
+		case "suit":
+			out.Values[i] = ec._LiarsPokerCardStatus_suit(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "value":
+			out.Values[i] = ec._LiarsPokerCardStatus_value(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "present":
+			out.Values[i] = ec._LiarsPokerCardStatus_present(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
+}
+
+var liarsPokerLobbyImplementors = []string{"LiarsPokerLobby", "LiarsPokerState"}
+
+func (ec *executionContext) _LiarsPokerLobby(ctx context.Context, sel ast.SelectionSet, obj *liarspoker.Lobby) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, liarsPokerLobbyImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("LiarsPokerLobby")
+		case "players":
+			out.Values[i] = ec._LiarsPokerLobby_players(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "numCards":
+			out.Values[i] = ec._LiarsPokerLobby_numCards(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "numDecks":
+			out.Values[i] = ec._LiarsPokerLobby_numDecks(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "callSize":
+			out.Values[i] = ec._LiarsPokerLobby_callSize(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
+}
+
+var liarsPokerPlayerImplementors = []string{"LiarsPokerPlayer"}
+
+func (ec *executionContext) _LiarsPokerPlayer(ctx context.Context, sel ast.SelectionSet, obj *liarspoker.Player) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, liarsPokerPlayerImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("LiarsPokerPlayer")
+		case "name":
+			out.Values[i] = ec._LiarsPokerPlayer_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "privateCards":
+			out.Values[i] = ec._LiarsPokerPlayer_privateCards(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "publicCards":
+			out.Values[i] = ec._LiarsPokerPlayer_publicCards(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "totalCards":
+			out.Values[i] = ec._LiarsPokerPlayer_totalCards(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "current":
+			out.Values[i] = ec._LiarsPokerPlayer_current(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "ready":
+			out.Values[i] = ec._LiarsPokerPlayer_ready(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
+}
+
+var liarsPokerPlayerCallImplementors = []string{"LiarsPokerPlayerCall"}
+
+func (ec *executionContext) _LiarsPokerPlayerCall(ctx context.Context, sel ast.SelectionSet, obj *liarspoker.PlayerCall) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, liarsPokerPlayerCallImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("LiarsPokerPlayerCall")
+		case "player":
+			out.Values[i] = ec._LiarsPokerPlayerCall_player(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "call":
+			out.Values[i] = ec._LiarsPokerPlayerCall_call(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
+}
+
+var liarsPokerPlayerCallStatusImplementors = []string{"LiarsPokerPlayerCallStatus"}
+
+func (ec *executionContext) _LiarsPokerPlayerCallStatus(ctx context.Context, sel ast.SelectionSet, obj *liarspoker.PlayerCall) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, liarsPokerPlayerCallStatusImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("LiarsPokerPlayerCallStatus")
+		case "player":
+			out.Values[i] = ec._LiarsPokerPlayerCallStatus_player(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "call":
+			out.Values[i] = ec._LiarsPokerPlayerCallStatus_call(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "exists":
+			out.Values[i] = ec._LiarsPokerPlayerCallStatus_exists(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
+}
+
+var liarsPokerRoundImplementors = []string{"LiarsPokerRound", "LiarsPokerState"}
+
+func (ec *executionContext) _LiarsPokerRound(ctx context.Context, sel ast.SelectionSet, obj *liarspoker.RoundState) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, liarsPokerRoundImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("LiarsPokerRound")
+		case "callSize":
+			out.Values[i] = ec._LiarsPokerRound_callSize(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "player":
+			out.Values[i] = ec._LiarsPokerRound_player(ctx, field, obj)
+		case "others":
+			out.Values[i] = ec._LiarsPokerRound_others(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "currentPlayer":
+			out.Values[i] = ec._LiarsPokerRound_currentPlayer(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "calls":
+			out.Values[i] = ec._LiarsPokerRound_calls(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
+}
+
+var liarsPokerRoundSummaryImplementors = []string{"LiarsPokerRoundSummary", "LiarsPokerState"}
+
+func (ec *executionContext) _LiarsPokerRoundSummary(ctx context.Context, sel ast.SelectionSet, obj *liarspoker.RoundSummaryState) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, liarsPokerRoundSummaryImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("LiarsPokerRoundSummary")
+		case "player":
+			out.Values[i] = ec._LiarsPokerRoundSummary_player(ctx, field, obj)
+		case "others":
+			out.Values[i] = ec._LiarsPokerRoundSummary_others(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "winner":
+			out.Values[i] = ec._LiarsPokerRoundSummary_winner(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "loser":
+			out.Values[i] = ec._LiarsPokerRoundSummary_loser(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "calls":
+			out.Values[i] = ec._LiarsPokerRoundSummary_calls(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -2042,8 +4483,75 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		switch field.Name {
 		case "__typename":
 			out.Values[i] = graphql.MarshalString("Mutation")
-		case "codenames":
-			out.Values[i] = ec._Mutation_codenames(ctx, field)
+		case "stub_mutation":
+			out.Values[i] = ec._Mutation_stub_mutation(ctx, field)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "codenames_newGame":
+			out.Values[i] = ec._Mutation_codenames_newGame(ctx, field)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "codenames_hitTile":
+			out.Values[i] = ec._Mutation_codenames_hitTile(ctx, field)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "liarspoker_ready":
+			out.Values[i] = ec._Mutation_liarspoker_ready(ctx, field)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "liarspoker_setNumCards":
+			out.Values[i] = ec._Mutation_liarspoker_setNumCards(ctx, field)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "liarspoker_setNumDecks":
+			out.Values[i] = ec._Mutation_liarspoker_setNumDecks(ctx, field)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "liarspoker_setCallSize":
+			out.Values[i] = ec._Mutation_liarspoker_setCallSize(ctx, field)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "liarspoker_call":
+			out.Values[i] = ec._Mutation_liarspoker_call(ctx, field)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch()
+	if invalids > 0 {
+		return graphql.Null
+	}
+	return out
+}
+
+var playingCardImplementors = []string{"PlayingCard"}
+
+func (ec *executionContext) _PlayingCard(ctx context.Context, sel ast.SelectionSet, obj *playingcard.Card) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, playingCardImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	var invalids uint32
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("PlayingCard")
+		case "suit":
+			out.Values[i] = ec._PlayingCard_suit(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				invalids++
+			}
+		case "value":
+			out.Values[i] = ec._PlayingCard_value(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				invalids++
 			}
@@ -2073,7 +4581,7 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 		switch field.Name {
 		case "__typename":
 			out.Values[i] = graphql.MarshalString("Query")
-		case "codenames":
+		case "stub_query":
 			field := field
 			out.Concurrently(i, func() (res graphql.Marshaler) {
 				defer func() {
@@ -2081,7 +4589,21 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 						ec.Error(ctx, ec.Recover(ctx, r))
 					}
 				}()
-				res = ec._Query_codenames(ctx, field)
+				res = ec._Query_stub_query(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&invalids, 1)
+				}
+				return res
+			})
+		case "codenames_categories":
+			field := field
+			out.Concurrently(i, func() (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_codenames_categories(ctx, field)
 				if res == graphql.Null {
 					atomic.AddUint32(&invalids, 1)
 				}
@@ -2100,6 +4622,30 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 		return graphql.Null
 	}
 	return out
+}
+
+var subscriptionImplementors = []string{"Subscription"}
+
+func (ec *executionContext) _Subscription(ctx context.Context, sel ast.SelectionSet) func() graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, subscriptionImplementors)
+	ctx = graphql.WithFieldContext(ctx, &graphql.FieldContext{
+		Object: "Subscription",
+	})
+	if len(fields) != 1 {
+		ec.Errorf(ctx, "must subscribe to exactly one stream")
+		return nil
+	}
+
+	switch fields[0].Name {
+	case "stub_subscription":
+		return ec._Subscription_stub_subscription(ctx, fields[0])
+	case "codenames_board":
+		return ec._Subscription_codenames_board(ctx, fields[0])
+	case "liarspoker_state":
+		return ec._Subscription_liarspoker_state(ctx, fields[0])
+	default:
+		panic("unknown field " + strconv.Quote(fields[0].Name))
+	}
 }
 
 var tileImplementors = []string{"Tile"}
@@ -2398,20 +4944,6 @@ func (ec *executionContext) marshalNBoolean2bool(ctx context.Context, sel ast.Se
 	return res
 }
 
-func (ec *executionContext) marshalNCodeNames2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcodenamesᚐGame(ctx context.Context, sel ast.SelectionSet, v codenames.Game) graphql.Marshaler {
-	return ec._CodeNames(ctx, sel, &v)
-}
-
-func (ec *executionContext) marshalNCodeNames2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcodenamesᚐGame(ctx context.Context, sel ast.SelectionSet, v *codenames.Game) graphql.Marshaler {
-	if v == nil {
-		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
-			ec.Errorf(ctx, "must not be null")
-		}
-		return graphql.Null
-	}
-	return ec._CodeNames(ctx, sel, v)
-}
-
 func (ec *executionContext) unmarshalNInt2int(ctx context.Context, v interface{}) (int, error) {
 	return graphql.UnmarshalInt(v)
 }
@@ -2424,6 +4956,319 @@ func (ec *executionContext) marshalNInt2int(ctx context.Context, sel ast.Selecti
 		}
 	}
 	return res
+}
+
+func (ec *executionContext) marshalNLiarsPokerCard2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx context.Context, sel ast.SelectionSet, v liarspoker.Card) graphql.Marshaler {
+	return ec._LiarsPokerCard(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerCard2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCardᚄ(ctx context.Context, sel ast.SelectionSet, v []*liarspoker.Card) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNLiarsPokerCard2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+	return ret
+}
+
+func (ec *executionContext) marshalNLiarsPokerCard2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx context.Context, sel ast.SelectionSet, v *liarspoker.Card) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	return ec._LiarsPokerCard(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalNLiarsPokerCardInput2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx context.Context, v interface{}) (liarspoker.Card, error) {
+	return ec.unmarshalInputLiarsPokerCardInput(ctx, v)
+}
+
+func (ec *executionContext) unmarshalNLiarsPokerCardInput2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx context.Context, v interface{}) (*liarspoker.Card, error) {
+	if v == nil {
+		return nil, nil
+	}
+	res, err := ec.unmarshalNLiarsPokerCardInput2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx, v)
+	return &res, err
+}
+
+func (ec *executionContext) marshalNLiarsPokerCardStatus2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx context.Context, sel ast.SelectionSet, v liarspoker.Card) graphql.Marshaler {
+	return ec._LiarsPokerCardStatus(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerCardStatus2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCardᚄ(ctx context.Context, sel ast.SelectionSet, v []*liarspoker.Card) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNLiarsPokerCardStatus2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+	return ret
+}
+
+func (ec *executionContext) marshalNLiarsPokerCardStatus2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx context.Context, sel ast.SelectionSet, v *liarspoker.Card) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	return ec._LiarsPokerCardStatus(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalNLiarsPokerCardSuit2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐSuit(ctx context.Context, v interface{}) (liarspoker.Suit, error) {
+	var res liarspoker.Suit
+	return res, res.UnmarshalGQL(v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerCardSuit2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐSuit(ctx context.Context, sel ast.SelectionSet, v liarspoker.Suit) graphql.Marshaler {
+	return v
+}
+
+func (ec *executionContext) unmarshalNLiarsPokerCardValue2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐValue(ctx context.Context, v interface{}) (liarspoker.Value, error) {
+	var res liarspoker.Value
+	return res, res.UnmarshalGQL(v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerCardValue2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐValue(ctx context.Context, sel ast.SelectionSet, v liarspoker.Value) graphql.Marshaler {
+	return v
+}
+
+func (ec *executionContext) marshalNLiarsPokerPlayer2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx context.Context, sel ast.SelectionSet, v liarspoker.Player) graphql.Marshaler {
+	return ec._LiarsPokerPlayer(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerPlayer2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerᚄ(ctx context.Context, sel ast.SelectionSet, v []*liarspoker.Player) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+	return ret
+}
+
+func (ec *executionContext) marshalNLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx context.Context, sel ast.SelectionSet, v *liarspoker.Player) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	return ec._LiarsPokerPlayer(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerPlayerCall2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCall(ctx context.Context, sel ast.SelectionSet, v liarspoker.PlayerCall) graphql.Marshaler {
+	return ec._LiarsPokerPlayerCall(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerPlayerCall2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCallᚄ(ctx context.Context, sel ast.SelectionSet, v []*liarspoker.PlayerCall) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNLiarsPokerPlayerCall2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCall(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+	return ret
+}
+
+func (ec *executionContext) marshalNLiarsPokerPlayerCall2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCall(ctx context.Context, sel ast.SelectionSet, v *liarspoker.PlayerCall) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	return ec._LiarsPokerPlayerCall(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerPlayerCallStatus2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCall(ctx context.Context, sel ast.SelectionSet, v liarspoker.PlayerCall) graphql.Marshaler {
+	return ec._LiarsPokerPlayerCallStatus(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerPlayerCallStatus2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCallᚄ(ctx context.Context, sel ast.SelectionSet, v []*liarspoker.PlayerCall) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNLiarsPokerPlayerCallStatus2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCall(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+	return ret
+}
+
+func (ec *executionContext) marshalNLiarsPokerPlayerCallStatus2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayerCall(ctx context.Context, sel ast.SelectionSet, v *liarspoker.PlayerCall) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	return ec._LiarsPokerPlayerCallStatus(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNLiarsPokerState2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐState(ctx context.Context, sel ast.SelectionSet, v liarspoker.State) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	return ec._LiarsPokerState(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalNPlayingCardSuit2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcommonᚋplayingcardᚐSuit(ctx context.Context, v interface{}) (playingcard.Suit, error) {
+	var res playingcard.Suit
+	return res, res.UnmarshalGQL(v)
+}
+
+func (ec *executionContext) marshalNPlayingCardSuit2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcommonᚋplayingcardᚐSuit(ctx context.Context, sel ast.SelectionSet, v playingcard.Suit) graphql.Marshaler {
+	return v
+}
+
+func (ec *executionContext) unmarshalNPlayingCardValue2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcommonᚋplayingcardᚐValue(ctx context.Context, v interface{}) (playingcard.Value, error) {
+	var res playingcard.Value
+	return res, res.UnmarshalGQL(v)
+}
+
+func (ec *executionContext) marshalNPlayingCardValue2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋcommonᚋplayingcardᚐValue(ctx context.Context, sel ast.SelectionSet, v playingcard.Value) graphql.Marshaler {
+	return v
 }
 
 func (ec *executionContext) unmarshalNString2string(ctx context.Context, v interface{}) (string, error) {
@@ -2814,6 +5659,37 @@ func (ec *executionContext) marshalOBoolean2ᚖbool(ctx context.Context, sel ast
 		return graphql.Null
 	}
 	return ec.marshalOBoolean2bool(ctx, sel, *v)
+}
+
+func (ec *executionContext) unmarshalOLiarsPokerCardInput2ᚕᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCardᚄ(ctx context.Context, v interface{}) ([]*liarspoker.Card, error) {
+	var vSlice []interface{}
+	if v != nil {
+		if tmp1, ok := v.([]interface{}); ok {
+			vSlice = tmp1
+		} else {
+			vSlice = []interface{}{v}
+		}
+	}
+	var err error
+	res := make([]*liarspoker.Card, len(vSlice))
+	for i := range vSlice {
+		res[i], err = ec.unmarshalNLiarsPokerCardInput2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐCard(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) marshalOLiarsPokerPlayer2githubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx context.Context, sel ast.SelectionSet, v liarspoker.Player) graphql.Marshaler {
+	return ec._LiarsPokerPlayer(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalOLiarsPokerPlayer2ᚖgithubᚗcomᚋrhino1998ᚋcodenamesᚋgamesᚋliarspokerᚐPlayer(ctx context.Context, sel ast.SelectionSet, v *liarspoker.Player) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._LiarsPokerPlayer(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalOString2string(ctx context.Context, v interface{}) (string, error) {

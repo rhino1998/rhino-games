@@ -60,7 +60,7 @@ func NewGame(config Config) (*Game, error) {
 	}, nil
 }
 
-func (r *Game) Categories(ctx context.Context) ([]string, error) {
+func (r *Game) CodenamesCategories(ctx context.Context) ([]string, error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	categories := make([]string, 0, len(r.words))
@@ -70,19 +70,58 @@ func (r *Game) Categories(ctx context.Context) ([]string, error) {
 	return categories, nil
 }
 
-func (r *Game) Board(ctx context.Context, category string, code string) (*Board, error) {
+func (r *Game) CodenamesBoard(ctx context.Context, category string, code string) (<-chan *Board, error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
-	return r.games[category][code], nil
+
+	if _, ok := r.games[category]; !ok {
+		return nil, fmt.Errorf("Invalid category: %s", category)
+	}
+
+	board, ok := r.games[category][code]
+
+	if !ok {
+		board = &Board{}
+		r.games[category][code] = board
+	}
+
+	c := make(chan *Board, 1)
+	board.listeners = append(board.listeners, func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			c <- r.games[category][code]
+			return true
+		}
+	})
+
+	go func() {
+		<-ctx.Done()
+		close(c)
+	}()
+	if ok {
+		c <- board
+	} else {
+		c <- nil
+	}
+	return c, nil
 }
 
-func (r *Game) NewGame(ctx context.Context, category string, code string, x, y int) (bool, error) {
+func (r *Game) CodenamesNewGame(ctx context.Context, category string, code string, x, y int) (bool, error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	board := &Board{}
+	if _, ok := r.games[category]; !ok {
+		return false, fmt.Errorf("Invalid category: %s", category)
+	}
 
-	r.games[category][code] = board
+	board, ok := r.games[category][code]
+
+	if !ok {
+		board = &Board{}
+		r.games[category][code] = board
+	}
 
 	board.Tiles = make([][]Tile, x)
 	for i := 0; i < x; i++ {
@@ -116,10 +155,12 @@ func (r *Game) NewGame(ctx context.Context, category string, code string, x, y i
 		board.Tiles[i%x][(i/x)%y], board.Tiles[j%x][(j/x)%y] = board.Tiles[j%x][(j/x)%y], board.Tiles[i%x][(i/x)%y]
 	})
 
+	board.notify()
+
 	return true, nil
 }
 
-func (r *Game) HitTile(ctx context.Context, category string, code string, x, y int) (TileType, error) {
+func (r *Game) CodenamesHitTile(ctx context.Context, category string, code string, x, y int) (TileType, error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	gameCategory, ok := r.games[category]
@@ -137,6 +178,8 @@ func (r *Game) HitTile(ctx context.Context, category string, code string, x, y i
 	}
 
 	board.Tiles[x][y].Revealed = true
+
+	board.notify()
 
 	return board.Tiles[x][y].Kind, nil
 }

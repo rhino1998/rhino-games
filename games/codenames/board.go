@@ -1,3 +1,5 @@
+//go:generate gorunpkg github.com/alvaroloes/enumer -type=TileType
+
 package codenames
 
 import (
@@ -7,6 +9,18 @@ import (
 
 type Board struct {
 	Tiles [][]Tile
+
+	listeners []func() bool
+}
+
+func (b *Board) notify() {
+	kept := make([]func() bool, 0, len(b.listeners))
+	for _, listener := range b.listeners {
+		if listener() {
+			kept = append(kept, listener)
+		}
+	}
+	b.listeners = kept
 }
 
 type Tile struct {
@@ -25,25 +39,6 @@ const (
 	BLUE    TileType = 4
 )
 
-var TileType_name = map[TileType]string{
-	0: "UNKNOWN",
-	1: "NEUTRAL",
-	2: "DEATH",
-	3: "RED",
-	4: "BLUE",
-}
-var TileType_value = map[string]TileType{
-	"UNKNOWN": 0,
-	"NEUTRAL": 1,
-	"DEATH":   2,
-	"RED":     3,
-	"BLUE":    4,
-}
-
-func (t TileType) String() string {
-	return TileType_name[t]
-}
-
 func (t TileType) MarshalGQL(w io.Writer) {
 	fmt.Fprintf(w, "%q", t.String())
 }
@@ -53,6 +48,7 @@ func (t *TileType) UnmarshalGQL(v interface{}) error {
 	if !ok {
 		return fmt.Errorf("points must be strings")
 	}
-	*t = TileType_value[tile]
-	return nil
+	var err error
+	*t, err = TileTypeString(tile)
+	return err
 }

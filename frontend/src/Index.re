@@ -1,34 +1,35 @@
-Css.(global("body", [margin(px(0))]));
+/* [%bs.raw {|require('rsuite/lib/styles/index.less')|}]; */
+[%bs.raw {|require('rsuite/lib/styles/themes/dark/index.less')|}];
+[%bs.raw {|require('rsuite/lib/styles/themes/dark/index.less')|}];
 
-Css.(global("h4", [margin(px(0))]));
+[%bs.raw {|require('./Index.less')|}];
 
-Css.(global("h3", [margin(px(0))]));
+Css.(
+  global("html", [margin(px(0)), width(vw(100.0)), height(vh(100.0))])
+);
 
-module Style = {
+{
   open Css;
-  open Theme;
-  let frame =
-    style([
-      height(vh(100.0)),
-      width(vw(100.0)),
-      display(`grid),
-      gridTemplateColumns([`px(200), `auto]),
-      gridTemplateRows([`auto]),
-    ]);
-  let bodyFrame =
-    style([
-      height(pct(100.0)),
-      width(pct(100.0)),
-      display(`grid),
-      gridTemplateColumns([`auto]),
-      gridTemplateRows([`px(40), `auto]),
-    ]);
-  let pageFrame =
-    style([
-      overflow(`scroll),
-      height(Calc.(-)(vh(100.0), px(40))),
-      backgroundColor(HomePage.backgroundColor),
-    ]);
+  global(
+    "*::-webkit-scrollbar-track",
+    [
+      unsafe("boxShadow", "inset 0 0 6px rgba(0,0,0,0.3)"),
+      unsafe("borderRadius", "10px"),
+      backgroundColor(rgba(0, 0, 0, 0.2)),
+    ],
+  );
+  global(
+    "*::-webkit-scrollbar",
+    [width(px(8)), backgroundColor(rgba(0, 0, 0, 0.2))],
+  );
+  global(
+    "*::-webkit-scrollbar-thumb",
+    [
+      unsafe("boxShadow", "inset 0 0 6px rgba(0,0,0,0.3)"),
+      unsafe("borderRadius", "10px"),
+      backgroundColor(hex("232323")),
+    ],
+  );
 };
 
 module Router = {
@@ -37,6 +38,7 @@ module Router = {
     let url = ReasonReactRouter.useUrl();
     switch (url.path) {
     | ["codenames", ...rest] => <CodeNames url={...url, path: rest} />
+    | ["liarspoker", ...rest] => <LiarsPoker url={...url, path: rest} />
     | _ => <HomePage />
     };
   };

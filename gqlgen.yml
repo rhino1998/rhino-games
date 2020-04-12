@@ -1,6 +1,6 @@
 schema:
-    - games/schema.graphql
-    - games/*/schema.graphql
+  - games/schema.graphql
+  - games/**/schema.graphql
 struct_tag: gqlgen
 exec:
   filename: games/generated.go
@@ -19,5 +19,37 @@ models:
     model: github.com/rhino1998/codenames/games/codenames.Tile
   TileType:
     model: github.com/rhino1998/codenames/games/codenames.TileType
-  CodeNames:
-    model: github.com/rhino1998/codenames/games/codenames.Game
+
+  PlayingCardSuit:
+    model: github.com/rhino1998/codenames/games/common/playingcard.Suit
+  PlayingCardValue:
+    model: github.com/rhino1998/codenames/games/common/playingcard.Value
+  PlayingCard:
+    model: github.com/rhino1998/codenames/games/common/playingcard.Card
+  PlayingCardInput:
+    model: github.com/rhino1998/codenames/games/common/playingcard.Card
+
+  LiarsPokerLobby:
+    model: github.com/rhino1998/codenames/games/liarspoker.Lobby
+  LiarsPokerState:
+    model: github.com/rhino1998/codenames/games/liarspoker.State
+  LiarsPokerPlayer:
+    model: github.com/rhino1998/codenames/games/liarspoker.Player
+  LiarsPokerPlayerCall:
+    model: github.com/rhino1998/codenames/games/liarspoker.PlayerCall
+  LiarsPokerPlayerCallStatus:
+    model: github.com/rhino1998/codenames/games/liarspoker.PlayerCall
+  LiarsPokerRound:
+    model: github.com/rhino1998/codenames/games/liarspoker.RoundState
+  LiarsPokerCardSuit:
+    model: github.com/rhino1998/codenames/games/liarspoker.Suit
+  LiarsPokerCardValue:
+    model: github.com/rhino1998/codenames/games/liarspoker.Value
+  LiarsPokerCard:
+    model: github.com/rhino1998/codenames/games/liarspoker.Card
+  LiarsPokerCardInput:
+    model: github.com/rhino1998/codenames/games/liarspoker.Card
+  LiarsPokerCardStatus:
+    model: github.com/rhino1998/codenames/games/liarspoker.Card
+  LiarsPokerRoundSummary:
+    model: github.com/rhino1998/codenames/games/liarspoker.RoundSummaryState

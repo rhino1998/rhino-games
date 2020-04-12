@@ -1,0 +1,1 @@
+[@bs.module "./Index.less"] external test: string = "test";

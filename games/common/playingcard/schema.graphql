@@ -1,0 +1,35 @@
+type PlayingCard {
+  suit: PlayingCardSuit!
+  value: PlayingCardValue!
+
+}
+
+input PlayingCardInput {
+  suit: PlayingCardSuit!
+  value: PlayingCardValue!
+}
+
+enum PlayingCardValue  {
+  WILD
+  ACE
+  TWO
+  THREE
+  FOUR
+  FIVE
+  SIX
+  SEVEN
+  EIGHT
+  NINE
+  TEN
+  JACK
+  QUEEN
+  KING
+}
+
+enum PlayingCardSuit {
+  WILD
+  CLUBS
+  DIAMONDS
+  HEARTS
+  SPADES
+}

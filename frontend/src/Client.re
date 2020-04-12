@@ -1,4 +1,11 @@
-let inMemoryCache = ApolloInMemoryCache.createInMemoryCache();
+/* let fragmentMatcher = ApolloInMemoryCache.createIntrospectionFragmentMatcher(); */
+
+[@bs.module] external fragmentTypes: string = "../fragmentTypes.json";
+let fragmentMatcher =
+  ApolloInMemoryCache.createIntrospectionFragmentMatcher(~data=fragmentTypes);
+
+let inMemoryCache =
+  ApolloInMemoryCache.createInMemoryCache(~fragmentMatcher, ());
 
 /* Create an HTTP Link */
 let httpLink =
@@ -11,25 +18,27 @@ let httpLink =
   );
 
 let wsLink =
-  ApolloLinks.webSocketLink(
-    ~uri=
-      "ws://"
+  ApolloLinks.webSocketLink({
+    uri:
+      "wss://"
       /* ++"localhost:9000" */
       ++ (Webapi.Dom.location |> Webapi.Dom.Location.host)
       ++ "/graphql",
-    ~reconnect=true,
-    (),
-  );
-
-let link =
-  ApolloLinks.split(
-    (test: ReasonApolloTypes.splitTest) => {
-      let def = ApolloUtilities.getMainDefinition(test##query);
-      def##kind == "OperationDefinition" && def##operation == "subscription";
+    options: {
+      reconnect: true,
+      connectionParams: None,
     },
-    wsLink,
-    httpLink,
-  );
+  });
+
+/* let link = */
+/*   ApolloLinks.split( */
+/*     (test: ReasonApolloTypes.splitTest) => { */
+/*       let def = ApolloUtilities.getMainDefinition(test##query); */
+/*       def##kind == "OperationDefinition" && def##operation == "subscription"; */
+/*     }, */
+/*     wsLink, */
+/*     httpLink, */
+/*   ); */
 
 let instance =
   ReasonApollo.createApolloClient(

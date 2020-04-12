@@ -5,7 +5,7 @@ import (
 )
 
 type Config struct {
-	CodeNames codenames.Config `yaml:"code_names"`
+	CodeNames codenames.Config `yaml:"codenames"`
 
 	Port int `yaml:"port" default:"9000" envconfig:"PORT"`
 }

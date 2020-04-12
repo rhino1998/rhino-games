@@ -8,29 +8,23 @@ type tile = {
 
 type board = {tiles: array(array(tile))};
 
-type game = {board: option(board)};
-
 module NewGameM = [%graphql
   {|
     mutation newGame($category: String!, $code: String!, $x: Int!, $y:Int!){
-      codenames {
-        newGame(category: $category, code: $code, x:$x, y:$y)
-      }
+      codenames_newGame(category: $category, code: $code, x:$x, y:$y)
     }
   |}
 ];
 
-module GameQ = [%graphql
+module GameS = [%graphql
   {|
-    query game($category: String!, $code: String!){
-      game: codenames @bsRecord {
-        board(category: $category, code: $code) @bsRecord {
-          tiles @bsRecord {
-            word
-            kind
-            revealed
-          }
-        }
+    subscription game($category: String!, $code: String!){
+	  codenames_board(category: $category, code: $code) @bsRecord {
+	    tiles @bsRecord {
+          word
+          kind
+	     revealed
+	    }
       }
     }
   |}
@@ -38,10 +32,8 @@ module GameQ = [%graphql
 
 module CategoriesQ = [%graphql
   {|
-    query categories @bsRecord {
-      codenames {
-        categories
-      }
+    query categories {
+      codenames_categories
     }
   |}
 ];
@@ -49,9 +41,7 @@ module CategoriesQ = [%graphql
 module HitTileM = [%graphql
   {|
     mutation hitTile($category: String!, $code: String!, $x:Int!, $y:Int!){
-      codenames {
-        hitTile(category: $category, code: $code,x: $x, y: $y)
-      }
+      codenames_hitTile(category: $category, code: $code,x: $x, y: $y)
     }
   |}
 ];
@@ -60,31 +50,34 @@ module Board = {
   let kindColor = kind =>
     Css.(
       switch (kind) {
-      | `UNKNOWN => white
-      | `DEATH => rgba(0, 0, 0, 0.3)
-      | `RED => rgba(255, 0, 0, 0.3)
-      | `BLUE => rgba(0, 0, 255, 0.3)
-      | `NEUTRAL => rgba(240, 200, 0, 0.3)
+      | `UNKNOWN => grey
+      | `DEATH => rgba(0, 0, 0, 0.5)
+      | `RED => rgba(255, 0, 0, 0.5)
+      | `BLUE => rgba(0, 0, 255, 0.5)
+      | `NEUTRAL => rgba(240, 200, 0, 0.5)
       }
     );
 
   [@react.component]
-  let make = (~master, ~reset, ~refetch, ~category, ~code, ~hitTile, ~board: board) => {
+  let make = (~master, ~reset, ~category, ~code, ~hitTile, ~board: board) => {
     let x = board.tiles->Belt.Array.length;
-    let y = board.tiles->(Belt.Array.getExn(0))->Belt.Array.length;
-    React.useEffect0(()=>{
-        let intervalId = Js.Global.setInterval(refetch, 500);
-        Some(()=>Js.Global.clearInterval(intervalId))
-    });
+    let y =
+      board.tiles
+      ->Belt.Array.get(0)
+      ->Belt.Option.mapWithDefault(0, Belt.Array.length);
+    /* React.useEffect0(() => { */
+    /*   let intervalId = Js.Global.setInterval(refetch, 500); */
+    /*   Some(() => Js.Global.clearInterval(intervalId)); */
+    /* }); */
     <div className=Css.(style([height(pct(100.0))]))>
       <Columns className=Css.(style([height(pct(5.0))]))>
-        <button onClick={_ => ReasonReactRouter.push("/")}>
+        <RsuiteUi.Button onClick={_ => ReasonReactRouter.push("/")}>
           {ReasonReact.string("Home")}
-        </button>
-        <button onClick={_ => reset()->ignore}>
+        </RsuiteUi.Button>
+        <RsuiteUi.Button onClick={_ => reset()->ignore}>
           {ReasonReact.string("NEW")}
-        </button>
-        <button
+        </RsuiteUi.Button>
+        <RsuiteUi.Button
           onClick={
             _ =>
               master ?
@@ -92,7 +85,7 @@ module Board = {
                 ReasonReact.Router.push("?master")
           }>
           {ReasonReact.string("MASTER")}
-        </button>
+        </RsuiteUi.Button>
         <span>
           {ReasonReact.string("RED: ")}
           {
@@ -174,40 +167,35 @@ module Board = {
 module Game = {
   [@react.component]
   let make = (~category, ~code, ~x, ~y, ~master) => {
-    let gameQuery = GameQ.make(~category, ~code, ());
-    let (simple, full) =
-      ApolloHooks.useQuery(GameQ.definition, ~variables=gameQuery##variables);
+    let (simple, _full) =
+      ApolloHooks.useSubscription(
+        GameS.definition,
+        ~variables=GameS.makeVariables(~category, ~code, ()),
+      );
+
     let (newGameMutation, _simple, _full) =
       ApolloHooks.useMutation(
         NewGameM.definition,
-        ~refetchQueries=_ => [|gameQuery->ApolloHooks.toQueryObj|],
         ~variables=NewGameM.makeVariables(~category, ~code, ~x, ~y, ()),
       );
     let (hitTileMutation, _simple, _full) =
-      ApolloHooks.useMutation(HitTileM.definition, ~refetchQueries=_ =>
-        [|gameQuery->ApolloHooks.toQueryObj|]
-      );
-
+      ApolloHooks.useMutation(HitTileM.definition);
     let reset = () => newGameMutation()->ignore;
-
-    let refetch = () => full.refetch()->ignore;
-
     let hitTile = (~x, ~y) =>
       hitTileMutation(
         ~variables=HitTileM.makeVariables(~category, ~code, ~x, ~y, ()),
         (),
       )
       ->ignore;
-
     switch (simple) {
     | Loading => React.string("Loading")
     | Error(error) =>
       Js.log(error);
       React.string("error");
     | Data(data) =>
-      switch (data##game.board) {
+      switch (data##codenames_board) {
       | None => <OnLoad> reset </OnLoad>
-      | Some(board) => <Board board category code reset refetch hitTile master />
+      | Some(board) => <Board board category code reset hitTile master />
       }
     };
   };
@@ -220,11 +208,11 @@ module Menu = {
       {
         items
         ->Belt.Array.mapWithIndex((index, item) =>
-            <button
+            <RsuiteUi.Button
               onClick={_ => ReasonReactRouter.push(item ++ "/")}
               key=index->string_of_int>
               {ReasonReact.string(item)}
-            </button>
+            </RsuiteUi.Button>
           )
         |> ReasonReact.array
       }
@@ -241,6 +229,7 @@ let make = (~url: ReasonReactRouter.url) => {
   switch (url.path) {
   | [] =>
     switch (simple) {
+    | NoData => ReasonReact.string("NODATA???")
     | Loading => ReasonReact.string("LOADING")
     | Error(_) => ReasonReact.string("ERR")
     | Data(response) =>
@@ -252,14 +241,14 @@ let make = (~url: ReasonReactRouter.url) => {
           ])
         )>
         <h1> {React.string("CodeNames WordList Selection")} </h1>
-        <Menu items=response##codenames##categories />
+        <Menu items=response##codenames_categories />
       </div>
     }
   | [_category] =>
     <OnLoad>
       (
         () => {
-          let code = Util.gen_code(8);
+          let code = gen_code(8);
           ReasonReact.Router.push(code ++ "/");
         }
       )

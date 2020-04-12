@@ -1,0 +1,112 @@
+extend type Mutation {
+  liarspoker_ready(code: String!, player: String!): Boolean!
+  liarspoker_setNumCards(code: String!, numCards: Int!): Int!
+  liarspoker_setNumDecks(code: String!, numDecks: Int!): Int!
+  liarspoker_setCallSize(code: String!, callSize: Int!): Int!
+
+  liarspoker_call(code: String!, player: String!, call: [LiarsPokerCardInput!]): Boolean!
+  # liarspoker_nextHand(code: String!, player: String!): Boolean!
+}
+
+extend type Subscription {
+  liarspoker_state(code: String!, player: String): LiarsPokerState!
+}
+
+union LiarsPokerState = LiarsPokerLobby | LiarsPokerRound | LiarsPokerRoundSummary
+
+type LiarsPokerLobby {
+  players: [LiarsPokerPlayer!]!
+  numCards: Int!
+  numDecks: Int!
+  callSize: Int!
+}
+
+type LiarsPokerRound {
+  callSize: Int!
+
+  player: LiarsPokerPlayer
+  others: [LiarsPokerPlayer!]!
+  currentPlayer: LiarsPokerPlayer!
+
+  calls: [LiarsPokerPlayerCall!]!
+}
+
+type LiarsPokerRoundSummary {
+  player: LiarsPokerPlayer
+  others: [LiarsPokerPlayer!]!
+  winner: LiarsPokerPlayer!
+  loser: LiarsPokerPlayer!
+
+  calls: [LiarsPokerPlayerCallStatus!]!
+}
+
+type LiarsPokerPlayer {
+  name: String!
+  privateCards: [LiarsPokerCard!]!
+  publicCards: [LiarsPokerCard!]!
+  totalCards: Int!
+  current: Boolean!
+  ready: Boolean!
+}
+
+type LiarsPokerPlayerCall {
+  player: LiarsPokerPlayer!
+  call: [LiarsPokerCard!]!
+}
+
+type LiarsPokerPlayerCallStatus {
+  player: LiarsPokerPlayer!
+  call: [LiarsPokerCardStatus!]!
+
+  exists: Boolean!
+}
+
+input LiarsPokerPlayerCallInput {
+  player: String!
+  call: [LiarsPokerCardInput!]
+}
+
+type LiarsPokerCard {
+  suit: LiarsPokerCardSuit!
+  value: LiarsPokerCardValue!
+}
+
+input LiarsPokerCardInput {
+  suit: LiarsPokerCardSuit!
+  value: LiarsPokerCardValue!
+}
+
+type LiarsPokerCardStatus {
+  suit: LiarsPokerCardSuit!
+  value: LiarsPokerCardValue!
+  present: Boolean!
+}
+
+
+enum LiarsPokerCardValue  {
+  WILD
+  ZERO
+  ONE
+  TWO
+  THREE
+  FOUR
+  FIVE
+  SIX
+  SEVEN
+  EIGHT
+  NINE
+  TEN
+  ELEVEN
+  JACK
+  QUEEN
+  KING
+  ACE
+}
+
+enum LiarsPokerCardSuit {
+  WILD
+  CLUBS
+  DIAMONDS
+  HEARTS
+  SPADES
+}

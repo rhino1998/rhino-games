@@ -1,13 +1,17 @@
 schema {
   query: Query
   mutation: Mutation
+  subscription: Subscription
 }
 
 type Mutation {
-  codenames: CodeNames!
+  stub_mutation: Boolean!
 }
 
 type Query {
-  codenames: CodeNames!
+  stub_query: Boolean!
 }
 
+type Subscription {
+  stub_subscription: Boolean!
+}

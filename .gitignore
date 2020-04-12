@@ -1,5 +1,7 @@
 **/node_modules/
 **/*.lock
 
+.merlin
+
 lib
 games/generated.go

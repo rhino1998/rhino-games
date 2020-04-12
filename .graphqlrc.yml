@@ -7,3 +7,5 @@ extensions:
     generates:
       frontend/graphql_schema.json:
         - introspection
+      frontend/fragmentTypes.json:
+        - fragment-matcher
