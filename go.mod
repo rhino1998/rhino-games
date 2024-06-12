@@ -9,8 +9,8 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/mitchellh/mapstructure v1.1.2 // indirect
 	github.com/rs/cors v1.7.0
-	github.com/vektah/gqlparser/v2 v2.0.1
+	github.com/vektah/gqlparser/v2 v2.5.14
 	gopkg.in/mcuadros/go-defaults.v1 v1.1.0
-	gopkg.in/yaml.v2 v2.2.8
+	gopkg.in/yaml.v2 v2.4.0
 	launchpad.net/gocheck v0.0.0-20140225173054-000000000087 // indirect
 )
